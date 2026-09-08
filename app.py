@@ -15,7 +15,6 @@ except Exception as e:
     st.error("⚠️ Error de conexión a Supabase.")
     st.stop()
 
-# Inicializar variables de sesión para el login
 if 'usuario_logeado' not in st.session_state:
     st.session_state.usuario_logeado = False
     st.session_state.rol = None
@@ -30,9 +29,7 @@ if not st.session_state.usuario_logeado:
         submit = st.form_submit_button("Ingresar")
         
         if submit:
-            # Buscar usuario en la BD
             res = supabase.table("usuarios").select("*").eq("usuario", usuario).eq("clave", clave).execute()
-            
             if len(res.data) > 0:
                 user_data = res.data[0]
                 st.session_state.usuario_logeado = True
@@ -41,9 +38,9 @@ if not st.session_state.usuario_logeado:
                 st.rerun()
             else:
                 st.error("Usuario o contraseña incorrectos.")
-    st.stop() # Detiene la ejecución del resto del código si no hay login
+    st.stop()
 
-# --- 3. BARRA LATERAL (CERRAR SESIÓN) ---
+# --- 3. BARRA LATERAL ---
 with st.sidebar:
     st.write(f"👤 **Usuario:** {st.session_state.nombre_usuario}")
     st.write(f"🛡️ **Rol:** {st.session_state.rol.capitalize()}")
@@ -54,21 +51,25 @@ with st.sidebar:
         st.rerun()
 
 # --- 4. FUNCIONES DE BASE DE DATOS ---
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=10) # TTL bajo para que refresque rápido si se agrega un producto
 def fetch_data(table):
     return supabase.table(table).select("*").execute().data
 
 def get_id(db, nombre):
     return next((item['id'] for item in db if item['nombre'].lower() == nombre.lower()), None)
 
+plantas_db = fetch_data("plantas")
+productos_db = fetch_data("productos")
+areas_db = fetch_data("areas")
+metricas_db = fetch_data("metricas")
+
 # --- 5. VISTAS SEGÚN ROL ---
-# Si el usuario es administrador, mostramos pestañas principales para separar la operación del mantenedor
 if st.session_state.rol == 'admin':
-    menu_principal = st.tabs(["🍞 Registro de Producción", "⚙️ Mantenedor de Usuarios"])
+    menu_principal = st.tabs(["🍞 Registro de Producción", "⚙️ Mantenedor Usuarios", "🥖 Mantenedor Productos"])
     vista_operacion = menu_principal[0]
-    vista_mantenedor = menu_principal[1]
+    vista_usuarios = menu_principal[1]
+    vista_productos = menu_principal[2]
 else:
-    # Si es operador, solo ve la operación
     vista_operacion = st.container()
 
 # ==========================================
@@ -77,30 +78,27 @@ else:
 with vista_operacion:
     st.title("Registro de Producción")
     
-    plantas_db = fetch_data("plantas")
-    productos_db = fetch_data("productos")
-    areas_db = fetch_data("areas")
-    metricas_db = fetch_data("metricas")
-
     nombres_plantas = [p['nombre'] for p in plantas_db] if plantas_db else []
     nombres_productos = [p['nombre'] for p in productos_db] if productos_db else []
 
-    if not nombres_plantas or not nombres_productos:
-        st.warning("No se encontraron plantas o productos en la base de datos.")
-        st.stop()
-
     st.header("1. Apertura de Turno")
-    col1, col2, col3 = st.columns(3)
-    with col1: fecha = st.date_input("Fecha", datetime.now())
-    with col2: planta = st.selectbox("Planta", nombres_plantas)
-    with col3: turno = st.selectbox("Turno", ["Mañana", "Tarde", "Noche"])
+    col_f, col_p, col_t1, col_t2 = st.columns([2, 2, 1, 1])
+    
+    with col_f: fecha = st.date_input("Fecha", datetime.now())
+    with col_p: planta = st.selectbox("Planta", nombres_plantas)
+    
+    # Botones combinados para el turno
+    with col_t1: 
+        letra_turno = st.radio("Letra", ["A", "B", "C"], horizontal=True)
+    with col_t2: 
+        num_turno = st.radio("Número", ["1", "2", "3"], horizontal=True)
+    
+    turno_final = f"{letra_turno}{num_turno}"
 
     st.divider()
 
     st.header("2. Detalle Operativo")
-    tab_masa, tab_corte, tab_horno, tab_camara, tab_envasado = st.tabs([
-        "Masa", "Corte", "Horno", "Cámara", "Envasado"
-    ])
+    tab_masa, tab_corte, tab_horno, tab_camara, tab_envasado = st.tabs(["Masa", "Corte", "Horno", "Cámara", "Envasado"])
 
     with tab_masa:
         prod_masa = st.selectbox("Producto Masa", nombres_productos, key="prod_masa")
@@ -141,7 +139,7 @@ with vista_operacion:
 
     if st.button("💾 Guardar Reporte de Turno", type="primary", use_container_width=True):
         planta_id = get_id(plantas_db, planta)
-        data_turno = {"fecha": str(fecha), "planta_id": planta_id, "turno": turno}
+        data_turno = {"fecha": str(fecha), "planta_id": planta_id, "turno": turno_final}
         
         try:
             res_turno = supabase.table("reporte_turnos").insert(data_turno).execute()
@@ -177,21 +175,18 @@ with vista_operacion:
             if detalles_a_insertar:
                 supabase.table("reporte_detalles").insert(detalles_a_insertar).execute()
             
-            st.success(f"✅ Reporte guardado. ID: {turno_id}")
+            st.success(f"✅ Reporte guardado. Turno registrado: {turno_final} (ID: {turno_id})")
             st.balloons()
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Error al guardar: {e}")
 
 # ==========================================
-# VISTA: MANTENEDOR (SOLO ADMIN)
+# VISTA: MANTENEDOR USUARIOS (SOLO ADMIN)
 # ==========================================
 if st.session_state.rol == 'admin':
-    with vista_mantenedor:
+    with vista_usuarios:
         st.subheader("Gestión de Usuarios")
-        
-        # Formulario para crear usuario
         with st.form("crear_usuario"):
-            st.write("Nuevo Usuario")
             nuevo_user = st.text_input("Nombre de Usuario")
             nueva_clave = st.text_input("Contraseña", type="password")
             nuevo_rol = st.selectbox("Rol", ["operador", "admin"])
@@ -200,28 +195,59 @@ if st.session_state.rol == 'admin':
                 if nuevo_user and nueva_clave:
                     try:
                         supabase.table("usuarios").insert({
-                            "usuario": nuevo_user, 
-                            "clave": nueva_clave, 
-                            "rol": nuevo_rol
+                            "usuario": nuevo_user, "clave": nueva_clave, "rol": nuevo_rol
                         }).execute()
+                        fetch_data.clear()
                         st.success(f"Usuario {nuevo_user} creado.")
                         st.rerun()
-                    except Exception as e:
+                    except Exception:
                         st.error("Error al crear. El usuario podría ya existir.")
                 else:
                     st.warning("Completa todos los campos.")
 
         st.divider()
-        
-        # Lista y eliminación de usuarios
         st.write("Usuarios Actuales")
-        usuarios_db = supabase.table("usuarios").select("*").execute().data
-        
+        usuarios_db = fetch_data("usuarios")
         for u in usuarios_db:
             c1, c2, c3 = st.columns([3, 2, 1])
             c1.write(f"👤 {u['usuario']}")
             c2.write(f"🛡️ {u['rol']}")
-            if u['usuario'] != 'admin': # Proteger al admin principal
-                if c3.button("Eliminar", key=f"del_{u['id']}", type="secondary"):
+            if u['usuario'] != 'admin':
+                if c3.button("Eliminar", key=f"del_user_{u['id']}", type="secondary"):
                     supabase.table("usuarios").delete().eq("id", u['id']).execute()
+                    fetch_data.clear()
                     st.rerun()
+
+# ==========================================
+# VISTA: MANTENEDOR PRODUCTOS (SOLO ADMIN)
+# ==========================================
+if st.session_state.rol == 'admin':
+    with vista_productos:
+        st.subheader("Catálogo de Variedades de Pan")
+        with st.form("crear_producto"):
+            nuevo_prod = st.text_input("Nuevo Producto")
+            if st.form_submit_button("Agregar Producto"):
+                if nuevo_prod:
+                    try:
+                        supabase.table("productos").insert({"nombre": nuevo_prod}).execute()
+                        fetch_data.clear()
+                        st.success(f"Producto '{nuevo_prod}' agregado.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al crear el producto: {e}")
+                else:
+                    st.warning("Ingresa un nombre para el producto.")
+
+        st.divider()
+        st.write("Productos Actuales")
+        for p in productos_db:
+            cp1, cp2 = st.columns([4, 1])
+            cp1.write(f"🥖 {p['nombre']}")
+            if cp2.button("Eliminar", key=f"del_prod_{p['id']}", type="secondary"):
+                # Capturar posible error si se intenta borrar un producto con datos amarrados
+                try:
+                    supabase.table("productos").delete().eq("id", p['id']).execute()
+                    fetch_data.clear()
+                    st.rerun()
+                except Exception:
+                    st.error("No se puede eliminar un producto que ya tiene registros en la base de datos.")
