@@ -131,10 +131,9 @@ def render_masa():
         v_prod = st.selectbox(f"Prod Masa {i+1}", opciones_dinamicas, index=safe_index(opciones_dinamicas, get_val(f'masa_prod_{i}', opciones_dinamicas[0])), key=f"tmp_mp_{i}", label_visibility="collapsed")
         set_val(f'masa_prod_{i}', v_prod)
         if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
-            c1, c2, c3 = st.columns(3)
+            c1, c2 = st.columns(2)
             set_val(f'masa_batch_{i}', c1.number_input("Batches", min_value=0, step=1, value=get_val(f'masa_batch_{i}', 0), key=f"tmp_mb_{i}"))
             set_val(f'masa_rep_{i}', c2.number_input("Reproceso (Batches)", min_value=0, step=1, value=get_val(f'masa_rep_{i}', 0), key=f"tmp_mr_{i}"))
-            set_val(f'masa_bar_{i}', c3.number_input("Barrido (kg)", min_value=0.0, step=0.5, value=get_val(f'masa_bar_{i}', 0.0), key=f"tmp_mba_{i}"))
         st.divider()
     if st.button("➕ Añadir otra masa"):
         set_val('masa_count', count + 1)
@@ -170,7 +169,6 @@ def render_corte():
             set_val(f'corte_prod_{linea}_{i}', v_prod)
             
             if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
-                # Cambiado a 3 columnas porque quitamos Harina de aquí
                 c1, c2, c3 = st.columns(3)
                 set_val(f'corte_bat_{linea}_{i}', c1.number_input("Batches Cortados", min_value=0, step=1, value=get_val(f'corte_bat_{linea}_{i}', 0), key=f"tmp_cob_{linea}_{i}"))
                 set_val(f'corte_car_{linea}_{i}', c2.number_input("Carros", min_value=0, step=1, value=get_val(f'corte_car_{linea}_{i}', 0), key=f"tmp_coc_{linea}_{i}"))
@@ -231,11 +229,9 @@ def render_mermas():
         set_val('mermas_count', count + 1)
         st.rerun()
 
-
 # ==========================================
 # 6. MOTOR DEL WIZARD (FLUJO PASO A PASO)
 # ==========================================
-# Agregamos el nuevo paso al final
 pasos_nombres = ["Apertura de Turno", "Masa", "Cámara", "Corte", "Horno", "Envasado", "Mermas y Polveo"]
 paso_actual = get_val('paso_actual', 0)
 
@@ -294,7 +290,6 @@ with col_der:
                     p = get_val(f'masa_prod_{i}', '')
                     agregar_detalle("Masa", p, "Batch", get_val(f'masa_batch_{i}', 0))
                     agregar_detalle("Masa", p, "Reproceso", get_val(f'masa_rep_{i}', 0))
-                    agregar_detalle("Masa", p, "Barrido", get_val(f'masa_bar_{i}', 0.0))
                 
                 # Extraer Cámara
                 for i in range(get_val('camara_count', 1)):
@@ -303,7 +298,7 @@ with col_der:
                     agregar_detalle("Cámara", p, "Reproceso", get_val(f'cam_rep_{i}', 0))
                     agregar_detalle("Cámara", p, "Merma", get_val(f'cam_mer_{i}', 0.0))
                     
-                # Extraer Corte (sin harina)
+                # Extraer Corte
                 for linea in ["C1", "C2", "C3", "Kornspitz", "Amasado"]:
                     count_linea = get_val(f'corte_count_{linea}', 1)
                     for i in range(count_linea):
