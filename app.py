@@ -160,10 +160,10 @@ with tab_masa:
         bar_m = col_m3.number_input("Barrido (kg)", min_value=0.0, step=0.5, key="bar_m")
 
 with tab_corte:
-    st.subheader("Líneas de Corte Simultáneas")
     datos_corte = {}
     
-    # Desplegamos las 3 líneas de una vez
+    # --- Líneas C1, C2, C3 ---
+    st.subheader("Líneas Principales")
     for linea in ["C1", "C2", "C3"]:
         st.markdown(f"**🟢 Línea {linea}**")
         prod_linea = st.selectbox(f"Estado / Producto ({linea})", opciones_producto, key=f"prod_corte_{linea}")
@@ -175,10 +175,26 @@ with tab_corte:
             sem = col_c3.number_input(f"Semillas sacos/kg ({linea})", min_value=0.0, step=1.0, key=f"sem_{linea}")
             datos_corte[linea] = {"producto": prod_linea, "carros": car, "harina": har, "semilla": sem}
         else:
-            # Si está detenida, guardamos 0 internamente para no procesar nada
             datos_corte[linea] = {"producto": prod_linea, "carros": 0, "harina": 0, "semilla": 0}
+    
+    st.divider()
+    
+    # --- Líneas Kornspitz y Amasado ---
+    st.subheader("Líneas Especiales")
+    for linea in ["Kornspitz", "Amasado"]:
+        st.markdown(f"**🟡 Línea {linea}**")
         
-        st.divider()
+        # Aquí puedes sugerir que seleccionen el producto correspondiente a la línea, pero dejamos la opción abierta
+        prod_linea = st.selectbox(f"Estado / Producto ({linea})", opciones_producto, key=f"prod_corte_{linea}")
+        
+        if prod_linea not in ["No Aplica", "Línea Detenida"]:
+            col_c1, col_c2, col_c3 = st.columns(3)
+            car = col_c1.number_input(f"Carros ({linea})", min_value=0, step=1, key=f"car_{linea}")
+            har = col_c2.number_input(f"Harina sacos/kg ({linea})", min_value=0.0, step=1.0, key=f"har_{linea}")
+            sem = col_c3.number_input(f"Semillas sacos/kg ({linea})", min_value=0.0, step=1.0, key=f"sem_{linea}")
+            datos_corte[linea] = {"producto": prod_linea, "carros": car, "harina": har, "semilla": sem}
+        else:
+            datos_corte[linea] = {"producto": prod_linea, "carros": 0, "harina": 0, "semilla": 0}
 
 with tab_horno:
     prod_horno = st.selectbox("Producto Horno", opciones_producto, key="prod_horno")
@@ -231,7 +247,7 @@ if st.button("💾 Guardar Reporte Completo del Turno", type="primary", use_cont
             agregar_detalle("Masa", prod_masa, "Reproceso", rep_m)
             agregar_detalle("Masa", prod_masa, "Barrido", bar_m)
         
-        # Procesar Corte (Iterar por las 3 líneas)
+        # Procesar Corte (Iterar por todas las líneas procesadas)
         for linea, datos in datos_corte.items():
             if datos["producto"] not in ["No Aplica", "Línea Detenida"]:
                 agregar_detalle("Corte", datos["producto"], "Carros", datos["carros"], linea)
