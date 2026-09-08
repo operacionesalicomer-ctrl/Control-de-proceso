@@ -210,17 +210,17 @@ def render_envasado():
         st.rerun()
 
 def render_mermas():
-    st.caption("Registro final de mermas generales y harina de polveo.")
+    st.caption("Registro de mermas generales (puedes seleccionar un producto específico o dejar 'General' si aplica a todo el proceso).")
     count = get_val('mermas_count', 1)
     for i in range(count):
-        st.markdown(f"**🗑️ Registro {i+1}**")
-        v_prod = st.selectbox(f"Producto {i+1}", opciones_dinamicas, index=safe_index(opciones_dinamicas, get_val(f'merma_prod_{i}', opciones_dinamicas[0])), key=f"tmp_mermap_{i}", label_visibility="collapsed")
+        st.markdown(f"**🗑️ Registro de Merma {i+1}**")
+        v_prod = st.selectbox(f"Producto / Categoría {i+1}", opciones_dinamicas, index=safe_index(opciones_dinamicas, get_val(f'merma_prod_{i}', opciones_dinamicas[0])), key=f"tmp_mermap_{i}", label_visibility="collapsed")
         set_val(f'merma_prod_{i}', v_prod)
         if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
             c1, c2, c3 = st.columns(3)
-            set_val(f'merma_cruda_{i}', c1.number_input("Merma Cruda (kg)", min_value=0.0, step=0.5, value=get_val(f'merma_cruda_{i}', 0.0), key=f"tmp_mcr_{i}"))
-            set_val(f'merma_horneada_{i}', c2.number_input("Merma Horneada (kg)", min_value=0.0, step=0.5, value=get_val(f'merma_horneada_{i}', 0.0), key=f"tmp_mho_{i}"))
-            set_val(f'polveo_{i}', c3.number_input("Harina de Polveo (kg)", min_value=0.0, step=0.5, value=get_val(f'polveo_{i}', 0.0), key=f"tmp_mpol_{i}"))
+            set_val(f'merma_cruda_{i}', c1.number_input("Merma Cruda (Masa) [kg]", min_value=0.0, step=0.5, value=get_val(f'merma_cruda_{i}', 0.0), key=f"tmp_mcr_{i}"))
+            set_val(f'merma_horneada_{i}', c2.number_input("Merma Horneada (Pan) [kg]", min_value=0.0, step=0.5, value=get_val(f'merma_horneada_{i}', 0.0), key=f"tmp_mho_{i}"))
+            set_val(f'barrido_{i}', c3.number_input("Harina de Barrido [kg]", min_value=0.0, step=0.5, value=get_val(f'barrido_{i}', 0.0), key=f"tmp_bar_{i}"))
         st.divider()
     if st.button("➕ Añadir otro registro de mermas"):
         set_val('mermas_count', count + 1)
@@ -229,7 +229,7 @@ def render_mermas():
 # ==========================================
 # 6. MOTOR DEL WIZARD (FLUJO PASO A PASO)
 # ==========================================
-pasos_nombres = ["Apertura de Turno", "Masa", "Cámara", "Corte", "Horno", "Envasado", "Mermas y Polveo"]
+pasos_nombres = ["Apertura de Turno", "Masa", "Cámara", "Corte", "Horno", "Envasado", "Mermas y Barrido"]
 paso_actual = get_val('paso_actual', 0)
 
 st.title("Registro de Producción Integral")
@@ -294,7 +294,7 @@ with col_der:
                     agregar_detalle("Cámara", p, "Batch", get_val(f'cam_bat_{i}', 0))
                     agregar_detalle("Cámara", p, "Reproceso", get_val(f'cam_rep_{i}', 0))
                     
-                # Extraer Corte 
+                # Extraer Corte
                 for linea in ["C1", "C2", "C3", "Kornspitz", "Amasado"]:
                     count_linea = get_val(f'corte_count_{linea}', 1)
                     for i in range(count_linea):
@@ -316,12 +316,12 @@ with col_der:
                     p = get_val(f'env_prod_{i}', '')
                     agregar_detalle("Envasado", p, "Cajas", get_val(f'env_caj_{i}', 0))
 
-                # Extraer Mermas y Polveo
+                # Extraer Mermas, Barrido y Polveo
                 for i in range(get_val('mermas_count', 1)):
                     p = get_val(f'merma_prod_{i}', '')
                     agregar_detalle("Mermas y Polveo", p, "Merma Cruda", get_val(f'merma_cruda_{i}', 0.0))
                     agregar_detalle("Mermas y Polveo", p, "Merma Horneada", get_val(f'merma_horneada_{i}', 0.0))
-                    agregar_detalle("Mermas y Polveo", p, "Polveo", get_val(f'polveo_{i}', 0.0))
+                    agregar_detalle("Mermas y Polveo", p, "Barrido", get_val(f'barrido_{i}', 0.0))
 
                 if detalles_a_insertar:
                     supabase.table("reporte_detalles").insert(detalles_a_insertar).execute()
