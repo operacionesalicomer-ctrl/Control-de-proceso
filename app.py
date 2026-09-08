@@ -48,7 +48,6 @@ def fetch_data(table):
 def get_id(db, nombre):
     return next((item['id'] for item in db if item['nombre'].lower() == nombre.lower()), None)
 
-# Traemos los datos frescos
 plantas_db = fetch_data("plantas")
 productos_db = fetch_data("productos")
 areas_db = fetch_data("areas")
@@ -57,6 +56,9 @@ usuarios_db = fetch_data("usuarios")
 
 nombres_plantas = [p['nombre'] for p in plantas_db] if plantas_db else []
 nombres_productos = [p['nombre'] for p in productos_db] if productos_db else []
+
+# Opciones combinadas para los selectores (Agregamos estados de línea)
+opciones_producto = ["No Aplica", "Línea Detenida"] + nombres_productos
 
 # --- 4. BARRA LATERAL Y MANTENEDORES ---
 with st.sidebar:
@@ -70,23 +72,18 @@ with st.sidebar:
     
     st.divider()
 
-    # MANTENEDORES (SOLO ADMIN)
     if st.session_state.rol == 'admin':
         st.subheader("🛠️ Administración")
         
-        # Mantenedor de Usuarios
         with st.expander("⚙️ Mantenedor Usuarios"):
             with st.form("crear_usuario"):
                 nuevo_user = st.text_input("Nuevo Usuario")
                 nueva_clave = st.text_input("Contraseña", type="password")
                 nuevo_rol = st.selectbox("Rol", ["jefe de turno", "admin"])
-                
                 if st.form_submit_button("Crear Usuario"):
                     if nuevo_user and nueva_clave:
                         try:
-                            supabase.table("usuarios").insert({
-                                "usuario": nuevo_user, "clave": nueva_clave, "rol": nuevo_rol
-                            }).execute()
+                            supabase.table("usuarios").insert({"usuario": nuevo_user, "clave": nueva_clave, "rol": nuevo_rol}).execute()
                             fetch_data.clear()
                             st.success(f"Creado: {nuevo_user}")
                             st.rerun()
@@ -105,7 +102,6 @@ with st.sidebar:
                         fetch_data.clear()
                         st.rerun()
                         
-        # Mantenedor de Productos
         with st.expander("🥖 Mantenedor Productos"):
             with st.form("crear_producto"):
                 nuevo_prod = st.text_input("Nuevo Producto")
@@ -136,7 +132,7 @@ with st.sidebar:
 # ==========================================
 # 5. VISTA PRINCIPAL: REGISTRO DE PRODUCCIÓN
 # ==========================================
-st.title("Registro de Producción")
+st.title("Registro de Producción Integral")
 
 st.header("1. Apertura de Turno")
 col_f, col_p, col_t1, col_t2 = st.columns([2, 2, 1, 1])
@@ -151,46 +147,65 @@ turno_final = f"{letra_turno}{num_turno}"
 st.divider()
 
 st.header("2. Detalle Operativo")
+st.caption("Completa las etapas. Si una etapa o línea no aplica, selecciona 'No Aplica' o 'Línea Detenida'. Todo se guardará en un solo reporte unificado al final.")
+
 tab_masa, tab_corte, tab_horno, tab_camara, tab_envasado = st.tabs(["Masa", "Corte", "Horno", "Cámara", "Envasado"])
 
 with tab_masa:
-    prod_masa = st.selectbox("Producto Masa", nombres_productos, key="prod_masa")
-    col_m1, col_m2, col_m3 = st.columns(3)
-    batch_m = col_m1.number_input("Batches", min_value=0, step=1, key="batch_m")
-    rep_m = col_m2.number_input("Reproceso (Batches)", min_value=0, step=1, key="rep_m")
-    bar_m = col_m3.number_input("Barrido (kg)", min_value=0.0, step=0.5, key="bar_m")
+    prod_masa = st.selectbox("Producto Masa", opciones_producto, key="prod_masa")
+    if prod_masa not in ["No Aplica", "Línea Detenida"]:
+        col_m1, col_m2, col_m3 = st.columns(3)
+        batch_m = col_m1.number_input("Batches", min_value=0, step=1, key="batch_m")
+        rep_m = col_m2.number_input("Reproceso (Batches)", min_value=0, step=1, key="rep_m")
+        bar_m = col_m3.number_input("Barrido (kg)", min_value=0.0, step=0.5, key="bar_m")
 
 with tab_corte:
-    linea_corte = st.selectbox("Línea", ["C1", "C2", "C3"])
-    prod_corte = st.selectbox("Producto Corte", nombres_productos, key="prod_corte")
-    col_c1, col_c2, col_c3 = st.columns(3)
-    car_c = col_c1.number_input("Carros", min_value=0, step=1, key="car_c")
-    har_c = col_c2.number_input("Harina (sacos/kg)", min_value=0.0, step=1.0, key="har_c")
-    sem_c = col_c3.number_input("Semillas (sacos/kg)", min_value=0.0, step=1.0, key="sem_c")
+    st.subheader("Líneas de Corte Simultáneas")
+    datos_corte = {}
+    
+    # Desplegamos las 3 líneas de una vez
+    for linea in ["C1", "C2", "C3"]:
+        st.markdown(f"**🟢 Línea {linea}**")
+        prod_linea = st.selectbox(f"Estado / Producto ({linea})", opciones_producto, key=f"prod_corte_{linea}")
+        
+        if prod_linea not in ["No Aplica", "Línea Detenida"]:
+            col_c1, col_c2, col_c3 = st.columns(3)
+            car = col_c1.number_input(f"Carros ({linea})", min_value=0, step=1, key=f"car_{linea}")
+            har = col_c2.number_input(f"Harina sacos/kg ({linea})", min_value=0.0, step=1.0, key=f"har_{linea}")
+            sem = col_c3.number_input(f"Semillas sacos/kg ({linea})", min_value=0.0, step=1.0, key=f"sem_{linea}")
+            datos_corte[linea] = {"producto": prod_linea, "carros": car, "harina": har, "semilla": sem}
+        else:
+            # Si está detenida, guardamos 0 internamente para no procesar nada
+            datos_corte[linea] = {"producto": prod_linea, "carros": 0, "harina": 0, "semilla": 0}
+        
+        st.divider()
 
 with tab_horno:
-    prod_horno = st.selectbox("Producto Horno", nombres_productos, key="prod_horno")
-    col_h1, col_h2, col_h3 = st.columns(3)
-    car_h = col_h1.number_input("Carros Horneados", min_value=0, step=1, key="car_h")
-    aba_h = col_h2.number_input("Abatidor (Carros)", min_value=0, step=1, key="aba_h")
-    cru_h = col_h3.number_input("Crudo (Carros)", min_value=0, step=1, key="cru_h")
+    prod_horno = st.selectbox("Producto Horno", opciones_producto, key="prod_horno")
+    if prod_horno not in ["No Aplica", "Línea Detenida"]:
+        col_h1, col_h2, col_h3 = st.columns(3)
+        car_h = col_h1.number_input("Carros Horneados", min_value=0, step=1, key="car_h")
+        aba_h = col_h2.number_input("Abatidor (Carros)", min_value=0, step=1, key="aba_h")
+        cru_h = col_h3.number_input("Crudo (Carros)", min_value=0, step=1, key="cru_h")
 
 with tab_camara:
-    prod_camara = st.selectbox("Producto Cámara", nombres_productos, key="prod_cam")
-    col_cam1, col_cam2, col_cam3 = st.columns(3)
-    bat_cam = col_cam1.number_input("Batches Cámara", min_value=0, step=1, key="bat_cam")
-    rep_cam = col_cam2.number_input("Reproceso", min_value=0, step=1, key="rep_cam")
-    mer_cam = col_cam3.number_input("Merma Reproceso (kg)", min_value=0.0, step=0.5, key="mer_cam")
+    prod_camara = st.selectbox("Producto Cámara", opciones_producto, key="prod_cam")
+    if prod_camara not in ["No Aplica", "Línea Detenida"]:
+        col_cam1, col_cam2, col_cam3 = st.columns(3)
+        bat_cam = col_cam1.number_input("Batches Cámara", min_value=0, step=1, key="bat_cam")
+        rep_cam = col_cam2.number_input("Reproceso", min_value=0, step=1, key="rep_cam")
+        mer_cam = col_cam3.number_input("Merma Reproceso (kg)", min_value=0.0, step=0.5, key="mer_cam")
 
 with tab_envasado:
-    prod_envasado = st.selectbox("Producto Envasado", nombres_productos, key="prod_env")
-    col_e1, col_e2 = st.columns(2)
-    caj_env = col_e1.number_input("Cajas", min_value=0, step=1, key="caj_env")
-    mer_env = col_e2.number_input("Merma Envasado (kg)", min_value=0.0, step=0.5, key="mer_env")
+    prod_envasado = st.selectbox("Producto Envasado", opciones_producto, key="prod_env")
+    if prod_envasado not in ["No Aplica", "Línea Detenida"]:
+        col_e1, col_e2 = st.columns(2)
+        caj_env = col_e1.number_input("Cajas", min_value=0, step=1, key="caj_env")
+        mer_env = col_e2.number_input("Merma Envasado (kg)", min_value=0.0, step=0.5, key="mer_env")
 
 st.divider()
 
-if st.button("💾 Guardar Reporte de Turno", type="primary", use_container_width=True):
+if st.button("💾 Guardar Reporte Completo del Turno", type="primary", use_container_width=True):
     planta_id = get_id(plantas_db, planta)
     data_turno = {"fecha": str(fecha), "planta_id": planta_id, "turno": turno_final}
     
@@ -200,7 +215,7 @@ if st.button("💾 Guardar Reporte de Turno", type="primary", use_container_widt
         detalles_a_insertar = []
         
         def agregar_detalle(area, prod, metrica, valor, sub_area=None):
-            if valor > 0:
+            if valor > 0 and prod not in ["No Aplica", "Línea Detenida"]:
                 detalles_a_insertar.append({
                     "reporte_id": turno_id,
                     "area_id": get_id(areas_db, area),
@@ -210,20 +225,35 @@ if st.button("💾 Guardar Reporte de Turno", type="primary", use_container_widt
                     "valor": valor
                 })
 
-        agregar_detalle("Masa", prod_masa, "Batch", batch_m)
-        agregar_detalle("Masa", prod_masa, "Reproceso", rep_m)
-        agregar_detalle("Masa", prod_masa, "Barrido", bar_m)
-        agregar_detalle("Corte", prod_corte, "Carros", car_c, linea_corte)
-        agregar_detalle("Corte", prod_corte, "Harina", har_c, linea_corte)
-        agregar_detalle("Corte", prod_corte, "Semilla", sem_c, linea_corte)
-        agregar_detalle("Horno", prod_horno, "Carros", car_h)
-        agregar_detalle("Horno", prod_horno, "Abatidor", aba_h)
-        agregar_detalle("Horno", prod_horno, "Crudo", cru_h)
-        agregar_detalle("Cámara", prod_camara, "Batch", bat_cam)
-        agregar_detalle("Cámara", prod_camara, "Reproceso", rep_cam)
-        agregar_detalle("Cámara", prod_camara, "Merma", mer_cam)
-        agregar_detalle("Envasado", prod_envasado, "Cajas", caj_env)
-        agregar_detalle("Envasado", prod_envasado, "Merma", mer_env)
+        # Procesar Masa
+        if prod_masa not in ["No Aplica", "Línea Detenida"]:
+            agregar_detalle("Masa", prod_masa, "Batch", batch_m)
+            agregar_detalle("Masa", prod_masa, "Reproceso", rep_m)
+            agregar_detalle("Masa", prod_masa, "Barrido", bar_m)
+        
+        # Procesar Corte (Iterar por las 3 líneas)
+        for linea, datos in datos_corte.items():
+            if datos["producto"] not in ["No Aplica", "Línea Detenida"]:
+                agregar_detalle("Corte", datos["producto"], "Carros", datos["carros"], linea)
+                agregar_detalle("Corte", datos["producto"], "Harina", datos["harina"], linea)
+                agregar_detalle("Corte", datos["producto"], "Semilla", datos["semilla"], linea)
+        
+        # Procesar Horno
+        if prod_horno not in ["No Aplica", "Línea Detenida"]:
+            agregar_detalle("Horno", prod_horno, "Carros", car_h)
+            agregar_detalle("Horno", prod_horno, "Abatidor", aba_h)
+            agregar_detalle("Horno", prod_horno, "Crudo", cru_h)
+            
+        # Procesar Cámara
+        if prod_camara not in ["No Aplica", "Línea Detenida"]:
+            agregar_detalle("Cámara", prod_camara, "Batch", bat_cam)
+            agregar_detalle("Cámara", prod_camara, "Reproceso", rep_cam)
+            agregar_detalle("Cámara", prod_camara, "Merma", mer_cam)
+            
+        # Procesar Envasado
+        if prod_envasado not in ["No Aplica", "Línea Detenida"]:
+            agregar_detalle("Envasado", prod_envasado, "Cajas", caj_env)
+            agregar_detalle("Envasado", prod_envasado, "Merma", mer_env)
 
         if detalles_a_insertar:
             supabase.table("reporte_detalles").insert(detalles_a_insertar).execute()
