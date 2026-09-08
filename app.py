@@ -74,7 +74,7 @@ opciones_dinamicas = ["Seleccione un producto...", "Línea Detenida"] + nombres_
 opciones_producto = ["Línea Detenida"] + nombres_productos
 
 # --- 4. BARRA LATERAL ---
-with sidebar_container := st.sidebar:
+with st.sidebar:
     st.write(f"👤 **Usuario:** {st.session_state.nombre_usuario}")
     st.write(f"🛡️ **Rol:** {st.session_state.rol.title()}")
     if st.button("Cerrar Sesión"):
