@@ -71,9 +71,10 @@ nombres_productos = [p['nombre'] for p in productos_db] if productos_db else []
 
 # Opciones combinadas para los selectores 
 opciones_dinamicas = ["Seleccione un producto...", "Línea Detenida"] + nombres_productos
+opciones_producto = ["Línea Detenida"] + nombres_productos
 
 # --- 4. BARRA LATERAL ---
-with st.sidebar:
+with sidebar_container := st.sidebar:
     st.write(f"👤 **Usuario:** {st.session_state.nombre_usuario}")
     st.write(f"🛡️ **Rol:** {st.session_state.rol.title()}")
     if st.button("Cerrar Sesión"):
@@ -143,10 +144,10 @@ def render_masa():
         st.rerun()
 
 def render_camara():
-    st.caption("Control de ingreso a cámaras.")
+    st.caption("Control de productos ingresados a la cámara.")
     count = get_val('camara_count', 1)
     for i in range(count):
-        st.markdown(f"**❄️ Cámara {i+1}**")
+        st.markdown(f"**❄️ Producto {i+1}**")
         v_prod = st.selectbox(f"Prod Camara {i+1}", opciones_dinamicas, index=safe_index(opciones_dinamicas, get_val(f'cam_prod_{i}', opciones_dinamicas[0])), key=f"tmp_cp_{i}", label_visibility="collapsed")
         set_val(f'cam_prod_{i}', v_prod)
         if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
@@ -155,7 +156,7 @@ def render_camara():
             set_val(f'cam_rep_{i}', c2.number_input("Reproceso", min_value=0, step=1, value=get_val(f'cam_rep_{i}', 0), key=f"tmp_cr_{i}"))
             set_val(f'cam_mer_{i}', c3.number_input("Merma Reproceso (kg)", min_value=0.0, step=0.5, value=get_val(f'cam_mer_{i}', 0.0), key=f"tmp_cm_{i}"))
         st.divider()
-    if st.button("➕ Añadir otra cámara"):
+    if st.button("➕ Añadir otro producto a la Cámara"):
         set_val('camara_count', count + 1)
         st.rerun()
 
@@ -177,7 +178,6 @@ def render_corte():
                 set_val(f'corte_har_{linea}_{i}', c2.number_input("Harina (kg)", min_value=0.0, step=1.0, value=get_val(f'corte_har_{linea}_{i}', 0.0), key=f"tmp_coh_{linea}_{i}"))
                 set_val(f'corte_sem_{linea}_{i}', c3.number_input("Semillas (kg)", min_value=0.0, step=1.0, value=get_val(f'corte_sem_{linea}_{i}', 0.0), key=f"tmp_cos_{linea}_{i}"))
         
-        # Botón para añadir más productos a ESTA línea
         if st.button(f"➕ Añadir otro producto a {linea}", key=f"btn_add_{linea}"):
             set_val(f'corte_count_{linea}', count + 1)
             st.rerun()
@@ -252,7 +252,7 @@ with col_der:
             set_val('paso_actual', paso_actual + 1)
             st.rerun()
     else:
-        # BOTÓN FINAL DE GUARDADO (Solo aparece en Envasado)
+        # BOTÓN FINAL DE GUARDADO 
         if st.button("💾 Guardar Reporte Completo", type="primary", use_container_width=True):
             planta_id = get_id(plantas_db, get_val('planta', ''))
             turno_final = f"{get_val('letra_turno', 'A')}{get_val('num_turno', '1')}"
@@ -315,6 +315,7 @@ with col_der:
                 
                 # Reiniciar el formulario dejándolo listo para el próximo turno
                 st.session_state.form_data = {}
+                set_val('paso_actual', 0) # Volver al inicio automáticamente
                 
             except Exception as e:
                 st.error(f"Error al guardar: {e}")
