@@ -21,7 +21,6 @@ if 'usuario_logeado' not in st.session_state:
     st.session_state.rol = None
     st.session_state.nombre_usuario = None
 
-# Base de datos temporal para guardar datos mientras navegamos adelante y atrás
 if 'form_data' not in st.session_state:
     st.session_state.form_data = {}
 
@@ -69,9 +68,7 @@ usuarios_db = fetch_data("usuarios")
 nombres_plantas = [p['nombre'] for p in plantas_db] if plantas_db else []
 nombres_productos = [p['nombre'] for p in productos_db] if productos_db else []
 
-# Opciones combinadas para los selectores 
 opciones_dinamicas = ["Seleccione un producto...", "Línea Detenida"] + nombres_productos
-opciones_producto = ["Línea Detenida"] + nombres_productos
 
 # --- 4. BARRA LATERAL ---
 with st.sidebar:
@@ -81,7 +78,7 @@ with st.sidebar:
         st.session_state.usuario_logeado = False
         st.session_state.rol = None
         st.session_state.nombre_usuario = None
-        st.session_state.form_data = {} # Limpiar datos al salir
+        st.session_state.form_data = {} 
         st.rerun()
     st.divider()
 
@@ -161,7 +158,7 @@ def render_camara():
         st.rerun()
 
 def render_corte():
-    st.caption("Estado de las 5 líneas de corte. Puedes agregar varios productos por línea si es necesario.")
+    st.caption("Estado de las líneas de corte. Selecciona el producto y registra batches, carros y semillas (sacos).")
     for linea in ["C1", "C2", "C3", "Kornspitz", "Amasado"]:
         icono = "🟢" if "C" in linea else "🟡"
         st.markdown(f"**{icono} Línea {linea}**")
@@ -173,10 +170,11 @@ def render_corte():
             set_val(f'corte_prod_{linea}_{i}', v_prod)
             
             if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
+                # Cambiado a 3 columnas porque quitamos Harina de aquí
                 c1, c2, c3 = st.columns(3)
-                set_val(f'corte_car_{linea}_{i}', c1.number_input("Carros", min_value=0, step=1, value=get_val(f'corte_car_{linea}_{i}', 0), key=f"tmp_coc_{linea}_{i}"))
-                set_val(f'corte_har_{linea}_{i}', c2.number_input("Harina (kg)", min_value=0.0, step=1.0, value=get_val(f'corte_har_{linea}_{i}', 0.0), key=f"tmp_coh_{linea}_{i}"))
-                set_val(f'corte_sem_{linea}_{i}', c3.number_input("Semillas (kg)", min_value=0.0, step=1.0, value=get_val(f'corte_sem_{linea}_{i}', 0.0), key=f"tmp_cos_{linea}_{i}"))
+                set_val(f'corte_bat_{linea}_{i}', c1.number_input("Batches Cortados", min_value=0, step=1, value=get_val(f'corte_bat_{linea}_{i}', 0), key=f"tmp_cob_{linea}_{i}"))
+                set_val(f'corte_car_{linea}_{i}', c2.number_input("Carros", min_value=0, step=1, value=get_val(f'corte_car_{linea}_{i}', 0), key=f"tmp_coc_{linea}_{i}"))
+                set_val(f'corte_sem_{linea}_{i}', c3.number_input("Semillas (sacos 25kg)", min_value=0.0, step=0.5, value=get_val(f'corte_sem_{linea}_{i}', 0.0), key=f"tmp_cos_{linea}_{i}"))
         
         if st.button(f"➕ Añadir otro producto a {linea}", key=f"btn_add_{linea}"):
             set_val(f'corte_count_{linea}', count + 1)
@@ -201,7 +199,7 @@ def render_horno():
         st.rerun()
 
 def render_envasado():
-    st.caption("Cierre y merma final.")
+    st.caption("Cierre y envasado.")
     count = get_val('envasado_count', 1)
     for i in range(count):
         st.markdown(f"**📦 Envasado {i+1}**")
@@ -216,10 +214,29 @@ def render_envasado():
         set_val('envasado_count', count + 1)
         st.rerun()
 
+def render_mermas():
+    st.caption("Registro final de mermas generales y harina de polveo.")
+    count = get_val('mermas_count', 1)
+    for i in range(count):
+        st.markdown(f"**🗑️ Registro {i+1}**")
+        v_prod = st.selectbox(f"Producto {i+1}", opciones_dinamicas, index=safe_index(opciones_dinamicas, get_val(f'merma_prod_{i}', opciones_dinamicas[0])), key=f"tmp_mermap_{i}", label_visibility="collapsed")
+        set_val(f'merma_prod_{i}', v_prod)
+        if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
+            c1, c2, c3 = st.columns(3)
+            set_val(f'merma_cruda_{i}', c1.number_input("Merma Cruda (kg)", min_value=0.0, step=0.5, value=get_val(f'merma_cruda_{i}', 0.0), key=f"tmp_mcr_{i}"))
+            set_val(f'merma_horneada_{i}', c2.number_input("Merma Horneada (kg)", min_value=0.0, step=0.5, value=get_val(f'merma_horneada_{i}', 0.0), key=f"tmp_mho_{i}"))
+            set_val(f'polveo_{i}', c3.number_input("Harina de Polveo (kg)", min_value=0.0, step=0.5, value=get_val(f'polveo_{i}', 0.0), key=f"tmp_mpol_{i}"))
+        st.divider()
+    if st.button("➕ Añadir otro registro de mermas"):
+        set_val('mermas_count', count + 1)
+        st.rerun()
+
+
 # ==========================================
 # 6. MOTOR DEL WIZARD (FLUJO PASO A PASO)
 # ==========================================
-pasos_nombres = ["Apertura de Turno", "Masa", "Cámara", "Corte", "Horno", "Envasado"]
+# Agregamos el nuevo paso al final
+pasos_nombres = ["Apertura de Turno", "Masa", "Cámara", "Corte", "Horno", "Envasado", "Mermas y Polveo"]
 paso_actual = get_val('paso_actual', 0)
 
 st.title("Registro de Producción Integral")
@@ -234,6 +251,7 @@ elif paso_actual == 2: render_camara()
 elif paso_actual == 3: render_corte()
 elif paso_actual == 4: render_horno()
 elif paso_actual == 5: render_envasado()
+elif paso_actual == 6: render_mermas()
 
 st.divider()
 
@@ -264,7 +282,7 @@ with col_der:
                 detalles_a_insertar = []
                 
                 def agregar_detalle(area, prod, metrica, valor, sub_area=None):
-                    if valor > 0 and prod not in ["Línea Detenida", "Seleccione un producto..."]:
+                    if valor > 0 and prod not in ["Línea Detenida", "Seleccione un producto...", ""]:
                         detalles_a_insertar.append({
                             "reporte_id": turno_id, "area_id": get_id(areas_db, area),
                             "producto_id": get_id(productos_db, prod), "metrica_id": get_id(metricas_db, metrica),
@@ -285,14 +303,15 @@ with col_der:
                     agregar_detalle("Cámara", p, "Reproceso", get_val(f'cam_rep_{i}', 0))
                     agregar_detalle("Cámara", p, "Merma", get_val(f'cam_mer_{i}', 0.0))
                     
-                # Extraer Corte
+                # Extraer Corte (sin harina)
                 for linea in ["C1", "C2", "C3", "Kornspitz", "Amasado"]:
                     count_linea = get_val(f'corte_count_{linea}', 1)
                     for i in range(count_linea):
                         p = get_val(f'corte_prod_{linea}_{i}', '')
+                        semilla_kg = get_val(f'corte_sem_{linea}_{i}', 0.0) * 25
+                        agregar_detalle("Corte", p, "Batch", get_val(f'corte_bat_{linea}_{i}', 0), linea)
                         agregar_detalle("Corte", p, "Carros", get_val(f'corte_car_{linea}_{i}', 0), linea)
-                        agregar_detalle("Corte", p, "Harina", get_val(f'corte_har_{linea}_{i}', 0.0), linea)
-                        agregar_detalle("Corte", p, "Semilla", get_val(f'corte_sem_{linea}_{i}', 0.0), linea)
+                        agregar_detalle("Corte", p, "Semilla", semilla_kg, linea)
                     
                 # Extraer Horno
                 for i in range(get_val('horno_count', 1)):
@@ -307,15 +326,22 @@ with col_der:
                     agregar_detalle("Envasado", p, "Cajas", get_val(f'env_caj_{i}', 0))
                     agregar_detalle("Envasado", p, "Merma", get_val(f'env_mer_{i}', 0.0))
 
+                # Extraer Mermas y Polveo
+                for i in range(get_val('mermas_count', 1)):
+                    p = get_val(f'merma_prod_{i}', '')
+                    agregar_detalle("Mermas y Polveo", p, "Merma Cruda", get_val(f'merma_cruda_{i}', 0.0))
+                    agregar_detalle("Mermas y Polveo", p, "Merma Horneada", get_val(f'merma_horneada_{i}', 0.0))
+                    agregar_detalle("Mermas y Polveo", p, "Polveo", get_val(f'polveo_{i}', 0.0))
+
                 if detalles_a_insertar:
                     supabase.table("reporte_detalles").insert(detalles_a_insertar).execute()
                 
                 st.success(f"✅ Reporte guardado exitosamente. Turno: {turno_final} (Folio interno: {turno_id})")
                 st.balloons()
                 
-                # Reiniciar el formulario dejándolo listo para el próximo turno
+                # Reiniciar el formulario
                 st.session_state.form_data = {}
-                set_val('paso_actual', 0) # Volver al inicio automáticamente
+                set_val('paso_actual', 0) 
                 
             except Exception as e:
                 st.error(f"Error al guardar: {e}")
