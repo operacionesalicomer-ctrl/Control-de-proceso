@@ -147,10 +147,9 @@ def render_camara():
         v_prod = st.selectbox(f"Prod Camara {i+1}", opciones_dinamicas, index=safe_index(opciones_dinamicas, get_val(f'cam_prod_{i}', opciones_dinamicas[0])), key=f"tmp_cp_{i}", label_visibility="collapsed")
         set_val(f'cam_prod_{i}', v_prod)
         if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
-            c1, c2, c3 = st.columns(3)
+            c1, c2 = st.columns(2)
             set_val(f'cam_bat_{i}', c1.number_input("Batches Cámara", min_value=0, step=1, value=get_val(f'cam_bat_{i}', 0), key=f"tmp_cb_{i}"))
             set_val(f'cam_rep_{i}', c2.number_input("Reproceso", min_value=0, step=1, value=get_val(f'cam_rep_{i}', 0), key=f"tmp_cr_{i}"))
-            set_val(f'cam_mer_{i}', c3.number_input("Merma Reproceso (kg)", min_value=0.0, step=0.5, value=get_val(f'cam_mer_{i}', 0.0), key=f"tmp_cm_{i}"))
         st.divider()
     if st.button("➕ Añadir otro producto a la Cámara"):
         set_val('camara_count', count + 1)
@@ -204,9 +203,7 @@ def render_envasado():
         v_prod = st.selectbox(f"Prod Envasado {i+1}", opciones_dinamicas, index=safe_index(opciones_dinamicas, get_val(f'env_prod_{i}', opciones_dinamicas[0])), key=f"tmp_ep_{i}", label_visibility="collapsed")
         set_val(f'env_prod_{i}', v_prod)
         if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
-            c1, c2 = st.columns(2)
-            set_val(f'env_caj_{i}', c1.number_input("Cajas", min_value=0, step=1, value=get_val(f'env_caj_{i}', 0), key=f"tmp_ec_{i}"))
-            set_val(f'env_mer_{i}', c2.number_input("Merma Envasado (kg)", min_value=0.0, step=0.5, value=get_val(f'env_mer_{i}', 0.0), key=f"tmp_em_{i}"))
+            set_val(f'env_caj_{i}', st.number_input("Cajas", min_value=0, step=1, value=get_val(f'env_caj_{i}', 0), key=f"tmp_ec_{i}"))
         st.divider()
     if st.button("➕ Añadir otro producto a Envasado"):
         set_val('envasado_count', count + 1)
@@ -296,9 +293,8 @@ with col_der:
                     p = get_val(f'cam_prod_{i}', '')
                     agregar_detalle("Cámara", p, "Batch", get_val(f'cam_bat_{i}', 0))
                     agregar_detalle("Cámara", p, "Reproceso", get_val(f'cam_rep_{i}', 0))
-                    agregar_detalle("Cámara", p, "Merma", get_val(f'cam_mer_{i}', 0.0))
                     
-                # Extraer Corte
+                # Extraer Corte 
                 for linea in ["C1", "C2", "C3", "Kornspitz", "Amasado"]:
                     count_linea = get_val(f'corte_count_{linea}', 1)
                     for i in range(count_linea):
@@ -319,7 +315,6 @@ with col_der:
                 for i in range(get_val('envasado_count', 1)):
                     p = get_val(f'env_prod_{i}', '')
                     agregar_detalle("Envasado", p, "Cajas", get_val(f'env_caj_{i}', 0))
-                    agregar_detalle("Envasado", p, "Merma", get_val(f'env_mer_{i}', 0.0))
 
                 # Extraer Mermas y Polveo
                 for i in range(get_val('mermas_count', 1)):
