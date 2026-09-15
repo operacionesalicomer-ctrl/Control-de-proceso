@@ -72,7 +72,7 @@ nombres_productos = [p['nombre'] for p in productos_db] if productos_db else []
 
 opciones_dinamicas = ["Seleccione un producto...", "Línea Detenida"] + nombres_productos
 
-# --- 4. BARRA LATERAL (INCLUYE CARGA MASIVA) ---
+# --- 4. BARRA LATERAL (ADMINISTRACIÓN Y CARGA) ---
 with st.sidebar:
     st.write(f"👤 **Usuario:** {st.session_state.nombre_usuario}")
     st.write(f"🛡️ **Rol:** {st.session_state.rol.title()}")
@@ -106,8 +106,12 @@ with st.sidebar:
             with st.form("crear_producto"):
                 nuevo_prod = st.text_input("Nuevo Producto")
                 if st.form_submit_button("Agregar") and nuevo_prod:
-                    supabase.table("productos").insert({"nombre": nuevo_prod}).execute()
-                    fetch_data.clear(); st.rerun()
+                    try:
+                        supabase.table("productos").insert({"nombre": nuevo_prod}).execute()
+                        fetch_data.clear(); st.rerun()
+                    except Exception as e:
+                        st.error("⚠️ Error: El producto ya existe o no se pudo guardar.")
+                        
             for p in productos_db:
                 cp1, cp2 = st.columns([4, 1])
                 cp1.caption(f"🥖 {p['nombre']}")
@@ -123,7 +127,7 @@ with st.sidebar:
                 if st.button("Procesar y Cargar Data", use_container_width=True):
                     try:
                         df = pd.read_excel(archivo_subido)
-                        df.columns = df.columns.str.strip().str.title() # Normalizar columnas
+                        df.columns = df.columns.str.strip().str.title() 
                         errores = 0
                         
                         turnos_unicos = df[['Fecha', 'Planta', 'Turno']].drop_duplicates()
@@ -142,7 +146,6 @@ with st.sidebar:
                                         if res_t.data:
                                             turno_id = res_t.data[0]['id']
                                             
-                                            # Extraer detalles del turno
                                             detalles_df = df[(df['Fecha'] == fila_turno['Fecha']) & 
                                                              (df['Turno'] == fila_turno['Turno']) & 
                                                              (df['Planta'] == fila_turno['Planta'])]
@@ -164,7 +167,7 @@ with st.sidebar:
                                             if detalles_insert:
                                                 supabase.table("reporte_detalles").insert(detalles_insert).execute()
                                     except Exception as e:
-                                        errores += 1 # Turno duplicado o error en BD
+                                        errores += 1
                         
                         if errores > 0:
                             st.warning(f"⚠️ Se omitieron {errores} turnos (probablemente ya existían).")
@@ -172,7 +175,7 @@ with st.sidebar:
                             st.success("✅ Carga masiva completada con éxito.")
                             
                     except Exception as e:
-                        st.error(f"❌ Error leyendo el archivo: Verifica el formato. Detalle: {e}")
+                        st.error(f"❌ Error leyendo el archivo. Detalle: {e}")
 
 # ==========================================
 # 5. FUNCIONES DE RENDERIZADO POR PASO
@@ -363,7 +366,7 @@ with col_der:
                             "sub_area": sub_area, "valor": valor
                         })
 
-                # GUARDAR DOTACIONES (Usan producto 'General')
+                # GUARDAR DOTACIONES
                 if get_val('dotacion_masa', 0) > 0: agregar_detalle("Masa", "General", "Operarios", get_val('dotacion_masa', 0))
                 if get_val('dotacion_camara', 0) > 0: agregar_detalle("Cámara", "General", "Operarios", get_val('dotacion_camara', 0))
                 for linea in ["C1", "C2", "C3", "Kornspitz", "Amasado"]:
