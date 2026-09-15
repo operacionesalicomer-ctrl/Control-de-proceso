@@ -1,4 +1,5 @@
 import streamlit as st
+import pandas as pd
 from supabase import create_client, Client
 from datetime import datetime
 
@@ -57,6 +58,7 @@ def fetch_data(table):
     return supabase.table(table).select("*").order("id").execute().data
 
 def get_id(db, nombre):
+    if not isinstance(nombre, str): return None
     return next((item['id'] for item in db if item['nombre'].lower() == nombre.lower()), None)
 
 plantas_db = fetch_data("plantas")
@@ -70,7 +72,7 @@ nombres_productos = [p['nombre'] for p in productos_db] if productos_db else []
 
 opciones_dinamicas = ["Seleccione un producto...", "Línea Detenida"] + nombres_productos
 
-# --- 4. BARRA LATERAL ---
+# --- 4. BARRA LATERAL (INCLUYE CARGA MASIVA) ---
 with st.sidebar:
     st.write(f"👤 **Usuario:** {st.session_state.nombre_usuario}")
     st.write(f"🛡️ **Rol:** {st.session_state.rol.title()}")
@@ -84,6 +86,7 @@ with st.sidebar:
 
     if st.session_state.rol == 'admin':
         st.subheader("🛠️ Administración")
+        
         with st.expander("⚙️ Mantenedor Usuarios"):
             with st.form("crear_usuario"):
                 nuevo_user = st.text_input("Nuevo Usuario")
@@ -111,6 +114,65 @@ with st.sidebar:
                 if cp2.button("❌", key=f"del_p_{p['id']}"):
                     supabase.table("productos").delete().eq("id", p['id']).execute()
                     fetch_data.clear(); st.rerun()
+                    
+        with st.expander("⬆️ Carga Masiva (Excel)"):
+            st.caption("Plantilla requerida con columnas: Fecha | Planta | Turno | Area | Maquina | Producto | Metrica | Valor")
+            archivo_subido = st.file_uploader("Sube historial en Excel", type=["xlsx", "xls"])
+            
+            if archivo_subido is not None:
+                if st.button("Procesar y Cargar Data", use_container_width=True):
+                    try:
+                        df = pd.read_excel(archivo_subido)
+                        df.columns = df.columns.str.strip().str.title() # Normalizar columnas
+                        errores = 0
+                        
+                        turnos_unicos = df[['Fecha', 'Planta', 'Turno']].drop_duplicates()
+                        
+                        with st.spinner('Cargando datos a Supabase...'):
+                            for index, fila_turno in turnos_unicos.iterrows():
+                                p_id = get_id(plantas_db, str(fila_turno['Planta']))
+                                if p_id:
+                                    data_t = {
+                                        "fecha": str(pd.to_datetime(fila_turno['Fecha']).date()), 
+                                        "planta_id": p_id, 
+                                        "turno": str(fila_turno['Turno'])
+                                    }
+                                    try:
+                                        res_t = supabase.table("reporte_turnos").insert(data_t).execute()
+                                        if res_t.data:
+                                            turno_id = res_t.data[0]['id']
+                                            
+                                            # Extraer detalles del turno
+                                            detalles_df = df[(df['Fecha'] == fila_turno['Fecha']) & 
+                                                             (df['Turno'] == fila_turno['Turno']) & 
+                                                             (df['Planta'] == fila_turno['Planta'])]
+                                            
+                                            detalles_insert = []
+                                            for _, det in detalles_df.iterrows():
+                                                a_id = get_id(areas_db, str(det['Area']))
+                                                pr_id = get_id(productos_db, str(det['Producto']))
+                                                m_id = get_id(metricas_db, str(det['Metrica']))
+                                                val = float(det['Valor']) if pd.notna(det['Valor']) else 0.0
+                                                
+                                                if a_id and pr_id and m_id and val > 0:
+                                                    sub_area = str(det['Maquina']) if pd.notna(det['Maquina']) and str(det['Maquina']).strip() != "" else None
+                                                    detalles_insert.append({
+                                                        "reporte_id": turno_id, "area_id": a_id,
+                                                        "producto_id": pr_id, "metrica_id": m_id,
+                                                        "sub_area": sub_area, "valor": val
+                                                    })
+                                            if detalles_insert:
+                                                supabase.table("reporte_detalles").insert(detalles_insert).execute()
+                                    except Exception as e:
+                                        errores += 1 # Turno duplicado o error en BD
+                        
+                        if errores > 0:
+                            st.warning(f"⚠️ Se omitieron {errores} turnos (probablemente ya existían).")
+                        else:
+                            st.success("✅ Carga masiva completada con éxito.")
+                            
+                    except Exception as e:
+                        st.error(f"❌ Error leyendo el archivo: Verifica el formato. Detalle: {e}")
 
 # ==========================================
 # 5. FUNCIONES DE RENDERIZADO POR PASO
@@ -124,7 +186,6 @@ def render_apertura():
     set_val('num_turno', c4.radio("Número", ["1", "2", "3"], index=safe_index(["1", "2", "3"], get_val('num_turno', '1')), horizontal=True, key="t_n"))
 
 def render_masa():
-    # DOTACIÓN MASA
     c_dot = st.columns([1, 3])
     set_val('dotacion_masa', c_dot[0].number_input("👥 N° Trabajadores (Masa)", min_value=0, step=1, value=get_val('dotacion_masa', 0), key="dot_masa"))
     st.divider()
@@ -145,7 +206,6 @@ def render_masa():
         st.rerun()
 
 def render_camara():
-    # DOTACIÓN CÁMARA
     c_dot = st.columns([1, 3])
     set_val('dotacion_camara', c_dot[0].number_input("👥 N° Trabajadores (Cámara)", min_value=0, step=1, value=get_val('dotacion_camara', 0), key="dot_camara"))
     st.divider()
@@ -172,7 +232,6 @@ def render_corte():
         
         col_tit, col_dot = st.columns([2, 1])
         col_tit.markdown(f"### {icono} Línea {linea}")
-        # DOTACIÓN POR LÍNEA DE CORTE
         set_val(f'dotacion_corte_{linea}', col_dot.number_input(f"👥 N° Trabajadores", min_value=0, step=1, value=get_val(f'dotacion_corte_{linea}', 0), key=f"dot_corte_{linea}"))
         
         count = get_val(f'corte_count_{linea}', 1)
@@ -193,7 +252,6 @@ def render_corte():
         st.divider()
 
 def render_horno():
-    # DOTACIÓN HORNO
     c_dot = st.columns([1, 3])
     set_val('dotacion_horno', c_dot[0].number_input("👥 N° Trabajadores (Horno)", min_value=0, step=1, value=get_val('dotacion_horno', 0), key="dot_horno"))
     st.divider()
@@ -215,7 +273,6 @@ def render_horno():
         st.rerun()
 
 def render_envasado():
-    # DOTACIÓN ENVASADO
     c_dot = st.columns([1, 3])
     set_val('dotacion_envasado', c_dot[0].number_input("👥 N° Trabajadores (Envasado)", min_value=0, step=1, value=get_val('dotacion_envasado', 0), key="dot_env"))
     st.divider()
@@ -244,7 +301,7 @@ def render_mermas():
             c1, c2, c3 = st.columns(3)
             set_val(f'merma_cruda_{i}', c1.number_input("Merma Cruda (kg)", min_value=0.0, step=0.5, value=get_val(f'merma_cruda_{i}', 0.0), key=f"tmp_mcr_{i}"))
             set_val(f'merma_horneada_{i}', c2.number_input("Merma Horneada (kg)", min_value=0.0, step=0.5, value=get_val(f'merma_horneada_{i}', 0.0), key=f"tmp_mho_{i}"))
-            set_val(f'polveo_{i}', c3.number_input("Harina de Polveo (kg)", min_value=0.0, step=0.5, value=get_val(f'polveo_{i}', 0.0), key=f"tmp_mpol_{i}"))
+            set_val(f'polveo_{i}', c3.number_input("Harina de Polveo/Barrido (kg)", min_value=0.0, step=0.5, value=get_val(f'polveo_{i}', 0.0), key=f"tmp_mpol_{i}"))
         st.divider()
     if st.button("➕ Añadir otro registro de mermas"):
         set_val('mermas_count', count + 1)
@@ -362,9 +419,8 @@ with col_der:
                 st.success(f"✅ Reporte guardado exitosamente. Turno: {turno_final} (Folio interno: {turno_id})")
                 st.balloons()
                 
-                # Reiniciar el formulario
                 st.session_state.form_data = {}
                 set_val('paso_actual', 0) 
                 
             except Exception as e:
-                st.error(f"Error al guardar: {e}")
+                st.error(f"Error al guardar. Si el turno ya existe, no se puede duplicar. Detalle técnico: {e}")
