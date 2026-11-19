@@ -11,6 +11,8 @@ from google.genai import types
 # --- 1. CONFIGURACIÓN E INICIALIZACIÓN ---
 st.set_page_config(page_title="Reporte Productivo", page_icon="🍞", layout="wide")
 
+MODELO_GEMINI = "gemini-3.8-flash"
+
 @st.cache_resource
 def init_connection():
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
@@ -29,6 +31,27 @@ except Exception as e:
     st.stop()
 
 client_ai = init_gemini()
+
+def llamar_gemini_con_reintento(prompt, es_json=False, temperatura=0.0, max_intentos=4):
+    """Llama a Gemini con reintento automático ante saturación temporal (503/429)."""
+    config_args = {"temperature": temperatura}
+    if es_json:
+        config_args["response_mime_type"] = "application/json"
+
+    for intento in range(max_intentos):
+        try:
+            response = client_ai.models.generate_content(
+                model=MODELO_GEMINI,
+                contents=prompt,
+                config=types.GenerateContentConfig(**config_args)
+            )
+            return response.text
+        except Exception as e:
+            err_str = str(e)
+            if ("503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str) and intento < max_intentos - 1:
+                time.sleep(3 * (intento + 1))
+            else:
+                raise e
 
 # --- 2. SISTEMA DE LOGIN Y MEMORIA ---
 if 'usuario_logeado' not in st.session_state:
@@ -227,7 +250,7 @@ def parsear_reporte_con_ia(texto_reporte, areas, productos, metricas):
     - Sub-áreas (líneas/máquinas): "C1", "C2", "C3", "Kornspitz", "Amasado" o null si no aplica.
 
     REGLAS DE MAPEO E INTERPRETACIÓN:
-    1. Ignora errores de ortografía ("resivi", "bach", "kl", "reproce", "polvoreo").
+    1. Ignora errores de ortografía ("resivi", "bach", "kl", "reproce", "polvoreo", "coccion").
     2. NO incluyas filas con valor 0, vacías o totales redundantes si ya están desglosados por producto/línea.
     3. Fecha obligatoriamente en formato YYYY-MM-DD (si el año viene como /26, corresponde a 2026).
     4. Estandariza el turno a "Día", "Tarde" o "Noche" (o el código de turno si aparece explícitamente, ej. A1, B2).
@@ -240,7 +263,7 @@ def parsear_reporte_con_ia(texto_reporte, areas, productos, metricas):
        - MERMA PAN COCIDO -> Área "Mermas y Polveo", producto "General", usando las métricas específicas: "Merma Deforme", "Merma Sin Greña", "Merma Crudo", "Merma Sobre Cocción", "Merma Pan a Piso", "Merma Manchado".
        - MERMA DE MASA Y OTROS -> Área "Mermas y Polveo", producto "General", usando "Merma Cruda" (para merma de masa), "Reproceso" y "Barrido".
        - INSUMOS -> Área "Insumos", producto "General", usando "Harina" (sacos), "Polveo" (harina polvoreo), "Semilla", "Semilla Recuperada", "Harina Recuperada".
-       - DOTACIÓN (ej. "Se trabajó con 25 personas") -> Área "Masa", producto "General", métrica "Operarios".
+       - DOTACIÓN (ej. "Se trabajó con 25 personas" o "Dotación personal 26 persona") -> Área "Masa", producto "General", métrica "Operarios".
     6. Si algún texto en un campo numérico aporta contexto (ej. "Integral: proteina" o "ultra congelado"), agrégalo al campo "novedades".
 
     Devuelve SOLO un JSON válido con esta estructura exacta:
@@ -258,15 +281,8 @@ def parsear_reporte_con_ia(texto_reporte, areas, productos, metricas):
     {texto_reporte}
     """
 
-    response = client_ai.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.0
-        )
-    )
-    return json.loads(response.text)
+    texto_json = llamar_gemini_con_reintento(prompt, es_json=True, temperatura=0.0)
+    return json.loads(texto_json)
 
 def render_carga_whatsapp():
     st.title("📥 Carga Automática desde WhatsApp (IA)")
@@ -295,7 +311,7 @@ def render_carga_whatsapp():
         st.info(f"🔎 Se detectaron **{len(bloques)}** reportes de turno en el texto.")
 
         if len(bloques) > 0:
-            col_lim1, col_lim2 = st.columns([1, 2])
+            col_lim1, _ = st.columns([1, 2])
             cantidad_proc = col_lim1.number_input(
                 "¿Cuántos reportes procesar (desde los más recientes)?",
                 min_value=1,
@@ -438,7 +454,6 @@ def render_reporte_semanal():
 
     df = pd.DataFrame(data)
 
-    # KPIs rápidos
     total_turnos = df['reporte_id'].nunique()
     total_cajas = df[df['metrica'] == 'Cajas']['valor'].sum()
     total_batch = df[(df['area'] == 'Masa') & (df['metrica'] == 'Batch')]['valor'].sum()
@@ -452,7 +467,6 @@ def render_reporte_semanal():
 
     st.divider()
 
-    # Resumen agrupado para visualizar y alimentar a la IA
     resumen_metricas = df.groupby(['planta', 'area', 'metrica', 'producto'], dropna=False)['valor'].sum().reset_index()
     novedades_unicas = df[['fecha', 'planta', 'turno', 'jefe_turno', 'novedades']].drop_duplicates()
 
@@ -471,7 +485,7 @@ def render_reporte_semanal():
             Eres el Jefe de Gestión y Mejora Continua de una planta panadera industrial.
             Analiza los datos reales de producción del período {fecha_ini} al {fecha_fin} (Planta: {planta_filtro}) y redacta un Reporte Semanal Ejecutivo en español.
 
-            DATOS CONSOLIDADOS (Area | Metrica | Producto | Total):
+            DATOS CONSOLIDADOS (Planta | Area | Metrica | Producto | Total):
             {resumen_metricas.to_string(index=False)}
 
             NOVEDADES DE LOS JEFES DE TURNO:
@@ -490,12 +504,11 @@ def render_reporte_semanal():
             """
 
             try:
-                resp = client_ai.models.generate_content(
-                    model="gemini-3.8-flash",
-                    contents=prompt_semanal,
-                    config=types.GenerateContentConfig(temperature=0.2)
+                st.session_state.reporte_semanal_md = llamar_gemini_con_reintento(
+                    prompt_semanal,
+                    es_json=False,
+                    temperatura=0.2
                 )
-                st.session_state.reporte_semanal_md = resp.text
             except Exception as e:
                 st.error(f"Error al generar el reporte con Gemini: {e}")
 
