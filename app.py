@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import re
-import json
 import time
 from datetime import datetime, timedelta
 from supabase import create_client, Client
@@ -32,18 +31,14 @@ except Exception as e:
 
 client_ai = init_gemini()
 
-def llamar_gemini_con_reintento(prompt, es_json=False, temperatura=0.0, max_intentos=4):
-    """Llama a Gemini con reintento automático ante saturación temporal (503/429)."""
-    config_args = {"temperature": temperatura}
-    if es_json:
-        config_args["response_mime_type"] = "application/json"
-
+def llamar_gemini_con_reintento(prompt, temperatura=0.2, max_intentos=4):
+    """Llama a Gemini con reintento automático (usado solo para el Reporte Semanal)."""
     for intento in range(max_intentos):
         try:
             response = client_ai.models.generate_content(
                 model=MODELO_GEMINI,
                 contents=prompt,
-                config=types.GenerateContentConfig(**config_args)
+                config=types.GenerateContentConfig(temperature=temperatura)
             )
             return response.text
         except Exception as e:
@@ -113,7 +108,7 @@ nombres_metricas = [m['nombre'] for m in metricas_db] if metricas_db else []
 
 opciones_dinamicas = ["Seleccione un producto...", "Línea Detenida"] + nombres_productos
 
-# --- 4. BARRA LATERAL (NAVEGACIÓN Y ADMINISTRACIÓN) ---
+# --- 4. BARRA LATERAL ---
 with st.sidebar:
     st.write(f"👤 **Usuario:** {st.session_state.nombre_usuario}")
     st.write(f"🛡️ **Rol:** {st.session_state.rol.title()}")
@@ -127,7 +122,7 @@ with st.sidebar:
 
     modo_app = st.radio(
         "📌 Módulo",
-        ["📥 Carga WhatsApp (IA)", "📊 Reporte Semanal (IA)", "📝 Formulario Manual"]
+        ["⚡ Carga WhatsApp (Plantilla)", "📊 Reporte Semanal (IA)", "📝 Formulario Manual"]
     )
     st.divider()
 
@@ -227,69 +222,307 @@ with st.sidebar:
                         st.error(f"❌ Error leyendo el archivo. Detalle: {e}")
 
 # ==========================================
-# MÓDULO A: CARGA WHATSAPP CON IA
+# MÓDULO A: PARSER BLINDADO DE WHATSAPP
 # ==========================================
+def _validar_fecha_dmy(d_str, m_str, y_str):
+    """Valida y normaliza una fecha D/M/Y a YYYY-MM-DD. Devuelve None si es imposible."""
+    try:
+        d, m = int(d_str), int(m_str)
+        y = int(f"20{y_str}") if len(y_str) == 2 else int(y_str)
+        if not (2020 <= y <= 2035):
+            return None
+        return datetime(y, m, d).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
 def extraer_bloques_whatsapp(texto_completo):
-    """Separa un chat exportado (.txt) de iPhone o Android y filtra solo los reportes de turno."""
-    patron_mensaje = r'(?=\[?\d{1,2}/\d{1,2}/\d{2,4},?\s+\d{1,2}:\d{2})'
-    mensajes = re.split(patron_mensaje, texto_completo)
-    reportes = [m.strip() for m in mensajes if "REPORTE DE TURNO" in m.upper()]
-    if not reportes and "REPORTE DE TURNO" in texto_completo.upper():
-        reportes = [texto_completo.strip()]
-    return reportes
+    """Separa un chat exportado (.txt) y devuelve lista de (texto_mensaje, fecha_chat_fallback)."""
+    # Limpiar caracteres invisibles que mete WhatsApp iOS (\u200e, \u202f, \ufeff)
+    texto_limpio = texto_completo.replace("\u200e", "").replace("\u202f", " ").replace("\ufeff", "")
+    patron_mensaje = r'(?=\[?\d{1,2}[/-]\d{1,2}[/-]\d{2,4},?\s+\d{1,2}:\d{2})'
+    mensajes = re.split(patron_mensaje, texto_limpio)
 
-def parsear_reporte_con_ia(texto_reporte, areas, productos, metricas):
-    """Convierte el texto crudo de WhatsApp al esquema relacional exacto de Supabase."""
-    prompt = f"""
-    Eres un analista de datos de producción panadera industrial. Convierte este reporte de turno de WhatsApp en un JSON estructurado.
+    resultados = []
+    for m in mensajes:
+        m_strip = m.strip()
+        if "REPORTE DE TURNO" not in m_strip.upper():
+            continue
+        # Capturar fecha del timestamp de WhatsApp como respaldo
+        m_ts = re.match(r'^\[?(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', m_strip)
+        fecha_wa = _validar_fecha_dmy(*m_ts.groups()) if m_ts else None
+        resultados.append((m_strip, fecha_wa))
 
-    REGLAS ESTRICTAS DE CATÁLOGO (usa ÚNICAMENTE los nombres exactos de estas listas):
-    - Áreas válidas: {areas}
-    - Productos válidos: {productos}
-    - Métricas válidas: {metricas}
-    - Sub-áreas (líneas/máquinas): "C1", "C2", "C3", "Kornspitz", "Amasado" o null si no aplica.
+    if not resultados and "REPORTE DE TURNO" in texto_limpio.upper():
+        resultados.append((texto_limpio.strip(), None))
+    return resultados
 
-    REGLAS DE MAPEO E INTERPRETACIÓN:
-    1. Ignora errores de ortografía ("resivi", "bach", "kl", "reproce", "polvoreo", "coccion").
-    2. NO incluyas filas con valor 0, vacías o totales redundantes si ya están desglosados por producto/línea.
-    3. Fecha obligatoriamente en formato YYYY-MM-DD (si el año viene como /26, corresponde a 2026).
-    4. Estandariza el turno a "Día", "Tarde" o "Noche" (o el código de turno si aparece explícitamente, ej. A1, B2).
-    5. Mapeo de secciones del reporte:
-       - MASAS -> Área "Masa", Métricas "Batch" o "Reproceso". Si un reproceso no especifica producto, usa producto "General".
-       - CÁMARA -> Área "Cámara", Métricas "Batch" o "Reproceso".
-       - CORTE -> Área "Corte", sub_area ("C1", "C2", "C3"), Métricas "Batch", "Reproceso" o "Carros" (usa producto "General" si el corte no indica el producto).
-       - HORNO -> Área "Horno", Métricas "Carros" (horneados), "Abatidor", "Crudo" (por hornear). Producto "General" si no detalla.
-       - ENVASADO -> Área "Envasado", Métrica "Cajas", con su producto exacto ("Rustica", "Toscano", "Integral", "Rustica Coctel", etc.).
-       - MERMA PAN COCIDO -> Área "Mermas y Polveo", producto "General", usando las métricas específicas: "Merma Deforme", "Merma Sin Greña", "Merma Crudo", "Merma Sobre Cocción", "Merma Pan a Piso", "Merma Manchado".
-       - MERMA DE MASA Y OTROS -> Área "Mermas y Polveo", producto "General", usando "Merma Cruda" (para merma de masa), "Reproceso" y "Barrido".
-       - INSUMOS -> Área "Insumos", producto "General", usando "Harina" (sacos), "Polveo" (harina polvoreo), "Semilla", "Semilla Recuperada", "Harina Recuperada".
-       - DOTACIÓN (ej. "Se trabajó con 25 personas" o "Dotación personal 26 persona") -> Área "Masa", producto "General", métrica "Operarios".
-    6. Si algún texto en un campo numérico aporta contexto (ej. "Integral: proteina" o "ultra congelado"), agrégalo al campo "novedades".
+def _limpiar_md(texto):
+    """Elimina negritas/tachados de WhatsApp (* y ~) que rompen búsquedas de etiquetas."""
+    return texto.replace("*", "").replace("~", "")
 
-    Devuelve SOLO un JSON válido con esta estructura exacta:
-    {{
-      "fecha": "YYYY-MM-DD",
-      "turno": "string",
-      "jefe_turno": "string",
-      "novedades": "string",
-      "detalles": [
-        {{"area": "string", "producto": "string", "metrica": "string", "sub_area": null, "valor": 0.0}}
-      ]
-    }}
+def _num(texto):
+    """Extrae el primer número positivo válido (entero o decimal). Ignora guiones o texto puro."""
+    if not texto:
+        return 0.0
+    # Eliminar placeholders tipo __ o ---
+    limpio = re.sub(r'[_\-]+', ' ', texto).strip()
+    m = re.search(r'(\d+(?:[.,]\d+)?)', limpio)
+    if not m:
+        return 0.0
+    try:
+        val = float(m.group(1).replace(',', '.'))
+        # Filtro anti-absurdos (ej. pegaron un RUT o teléfono por error)
+        if val <= 0 or val > 50000:
+            return 0.0
+        return val
+    except ValueError:
+        return 0.0
 
-    REPORTE A PROCESAR:
-    {texto_reporte}
-    """
+def _valor_linea(bloque, patron_etiqueta):
+    """Busca una etiqueta y extrae el número de esa línea."""
+    m = re.search(rf'(?im)^[^\n]*{patron_etiqueta}[^\n:]*[:=]?\s*([^\n]*)', bloque)
+    if not m:
+        return 0.0
+    return _num(m.group(1))
 
-    texto_json = llamar_gemini_con_reintento(prompt, es_json=True, temperatura=0.0)
-    return json.loads(texto_json)
+def _texto_linea(bloque, patron_etiqueta):
+    """Busca una etiqueta y devuelve el texto limpio sin guiones bajos de plantilla."""
+    m = re.search(rf'(?im)^[^\n]*{patron_etiqueta}[^\n:]*[:=]\s*([^\n]*)', bloque)
+    if not m:
+        return ""
+    limpio = re.sub(r'_+', '', m.group(1)).strip(" -:|.")
+    return limpio
+
+def parsear_reporte_plantilla(texto_crudo, fecha_wa_fallback=None):
+    """Parser blindado 1:1 para la plantilla oficial y tolerante a variantes antiguas."""
+    texto = _limpiar_md(texto_crudo)
+    alertas = []
+
+    # Dividir por secciones (tolera con o sin número, puntos, paréntesis o guiones)
+    patrones_sec = [
+        ("masas", r'(?im)^\s*(?:1\s*[\.\-\)]\s*)?MASAS\b'),
+        ("camara", r'(?im)^\s*(?:2\s*[\.\-\)]\s*)?C[AÁ]MARA\b'),
+        ("corte", r'(?im)^\s*(?:3\s*[\.\-\)]\s*)?CORTE\b'),
+        ("horno", r'(?im)^\s*(?:4\s*[\.\-\)]\s*)?HORNO\b'),
+        ("envasado", r'(?im)^\s*(?:5\s*[\.\-\)]\s*)?ENVASADO\b'),
+        ("merma_cocido", r'(?im)^\s*(?:6\s*[\.\-\)]\s*)?MERMA\s+PAN\b'),
+        ("merma_masa", r'(?im)^\s*(?:7\s*[\.\-\)]\s*)?MERMA\s+DE\s+MASA\b'),
+        ("insumos", r'(?im)^\s*(?:[58]\s*[\.\-\)]\s*)?INSUMOS\b'),
+        ("novedades", r'(?im)^\s*(?:9\s*[\.\-\)]\s*)?NOVEDADES\b'),
+    ]
+
+    posiciones = []
+    for nombre, pat in patrones_sec:
+        m = re.search(pat, texto)
+        if m:
+            posiciones.append((m.start(), nombre))
+    posiciones.sort()
+
+    secciones = {}
+    if posiciones:
+        secciones["header"] = texto[:posiciones[0][0]]
+        for i, (pos, nombre) in enumerate(posiciones):
+            fin = posiciones[i + 1][0] if i + 1 < len(posiciones) else len(texto)
+            secciones[nombre] = texto[pos:fin]
+    else:
+        secciones["header"] = texto
+        alertas.append("Sin secciones numeradas reconocibles")
+
+    detalles = []
+
+    def add(area, producto, metrica, valor, sub_area=None):
+        if valor and valor > 0:
+            detalles.append({
+                "area": area,
+                "producto": producto,
+                "metrica": metrica,
+                "sub_area": sub_area,
+                "valor": round(float(valor), 2)
+            })
+
+    # --- CABECERA ---
+    hdr = secciones.get("header", "")
+    m_fecha = re.search(r'(?i)Fecha\s*[:=]?\s*(\d{1,2})\s*[/\-\.]\s*(\d{1,2})\s*[/\-\.]\s*(\d{2,4})', hdr)
+    fecha_iso = _validar_fecha_dmy(*m_fecha.groups()) if m_fecha else None
+
+    if not fecha_iso:
+        if fecha_wa_fallback:
+            fecha_iso = fecha_wa_fallback
+            alertas.append("Fecha faltante/inválida (se usó fecha del chat)")
+        else:
+            fecha_iso = str(datetime.now().date())
+            alertas.append("Fecha faltante (se usó fecha de hoy)")
+
+    turno_raw = _texto_linea(hdr, r'Turno').lower()
+    coincidencias_turno = []
+    if any(k in turno_raw for k in ["mañana", "manana", "día", "dia", "am"]):
+        coincidencias_turno.append("Mañana")
+    if "tarde" in turno_raw:
+        coincidencias_turno.append("Tarde")
+    if "noche" in turno_raw:
+        coincidencias_turno.append("Noche")
+
+    if len(coincidencias_turno) == 1:
+        turno = coincidencias_turno[0]
+    elif len(coincidencias_turno) > 1:
+        turno = "Sin definir"
+        alertas.append("Turno dejó la plantilla sin elegir (Mañana/Tarde/Noche)")
+    elif turno_raw:
+        turno = turno_raw.title()[:20]
+    else:
+        turno = "Sin definir"
+        alertas.append("Turno vacío")
+
+    jefe_turno = _texto_linea(hdr, r'Jefe\s+de\s+turno').title()
+    if not jefe_turno:
+        alertas.append("Falta Jefe de turno")
+
+    # Dotación en cabecera o al final del mensaje (formato antiguo)
+    dotacion_total = _valor_linea(hdr, r'Dotaci[oó]n')
+    if dotacion_total == 0:
+        m_dot_alt = re.search(r'(?i)(?:se\s+trabaj[oó]\s+con|dotaci[oó]n(?:\s+personal)?)\s*[:=]?\s*(\d+)\s*personas?', texto)
+        if m_dot_alt:
+            dotacion_total = float(m_dot_alt.group(1))
+    if dotacion_total > 0:
+        add("General", "General", "Operarios", dotacion_total)
+
+    # --- 1. MASAS (batch) ---
+    s_masas = secciones.get("masas", "")
+    add("Masa", "Integral", "Batch", _valor_linea(s_masas, r'Integral'))
+    add("Masa", "Rustica", "Batch", _valor_linea(s_masas, r'R[uú]stica'))
+    add("Masa", "Toscano", "Batch", _valor_linea(s_masas, r'Toscano'))
+    add("Masa", "Otros", "Batch", _valor_linea(s_masas, r'Otros?'))
+    add("Masa", "General", "Reproceso", _valor_linea(s_masas, r'Reproceso'))
+
+    # --- 2. CÁMARA (batch) ---
+    s_cam = secciones.get("camara", "")
+    add("Cámara", "Integral", "Batch", _valor_linea(s_cam, r'Integral'))
+    add("Cámara", "Rustica", "Batch", _valor_linea(s_cam, r'R[uú]stica'))
+    add("Cámara", "Toscano", "Batch", _valor_linea(s_cam, r'Toscano'))
+    add("Cámara", "General", "Reproceso", _valor_linea(s_cam, r'Reproceso'))
+
+    # --- 3. CORTE ---
+    s_corte = secciones.get("corte", "")
+    for linea in ["C1", "C2", "C3"]:
+        m_lin = re.search(rf'(?im)^\s*{linea}\s*[:\-]([^\n]*)', s_corte)
+        if m_lin:
+            txt_l = m_lin.group(1)
+            m_b = re.search(r'(?i)batch\s*[:=_]?\s*(\d+(?:[.,]\d+)?)', txt_l)
+            m_r = re.search(r'(?i)reproce(?:so)?\s*[:=_]?\s*(\d+(?:[.,]\d+)?)', txt_l)
+            m_c = re.search(r'(?i)carros?\s*[:=_]?\s*(\d+(?:[.,]\d+)?)', txt_l)
+            m_d = re.search(r'(?i)dotaci[oó]n\s*[:=_]?\s*(\d+(?:[.,]\d+)?)', txt_l)
+            if m_b: add("Corte", "General", "Batch", _num(m_b.group(1)), linea)
+            if m_r: add("Corte", "General", "Reproceso", _num(m_r.group(1)), linea)
+            if m_c: add("Corte", "General", "Carros", _num(m_c.group(1)), linea)
+            if m_d: add("Corte", "General", "Operarios", _num(m_d.group(1)), linea)
+
+    # --- 4. HORNO (carros) ---
+    s_horno = secciones.get("horno", "")
+    add("Horno", "General", "Carros", _valor_linea(s_horno, r'Horneados'))
+    add("Horno", "General", "Abatidor", _valor_linea(s_horno, r'A\s+abatidor'))
+    add("Horno", "General", "Ultracongelado", _valor_linea(s_horno, r'(?:A\s+)?ultra\s*co[ng]+elado'))
+    add("Horno", "General", "Crudo", _valor_linea(s_horno, r'Quedan\s+por\s+hornear'))
+
+    # --- 5. ENVASADO (cajas) ---
+    s_env = secciones.get("envasado", "")
+    add("Envasado", "Integral", "Cajas", _valor_linea(s_env, r'Integral'))
+    val_rf = _valor_linea(s_env, r'R[uú]stica\s+familiar')
+    if val_rf > 0:
+        add("Envasado", "Rustica Familiar", "Cajas", val_rf)
+    else:
+        add("Envasado", "Rustica", "Cajas", _valor_linea(s_env, r'R[uú]stica(?!\s+c[oó]ctel)'))
+    add("Envasado", "Toscano", "Cajas", _valor_linea(s_env, r'Toscano'))
+    add("Envasado", "Otros", "Cajas", _valor_linea(s_env, r'Otros?'))
+
+    # --- 6. MERMA PAN COCIDO (kg) ---
+    s_mc = secciones.get("merma_cocido", "")
+    add("Mermas y Polveo", "General", "Merma Deforme", _valor_linea(s_mc, r'Deforme'))
+    add("Mermas y Polveo", "General", "Merma Sin Greña", _valor_linea(s_mc, r'Sin\s+gre[ñn]a'))
+    add("Mermas y Polveo", "General", "Merma Crudo", _valor_linea(s_mc, r'Crudo'))
+    add("Mermas y Polveo", "General", "Merma Sobre Cocción", _valor_linea(s_mc, r'Sobre\s+cocci[oó]n'))
+    add("Mermas y Polveo", "General", "Merma Pan a Piso", _valor_linea(s_mc, r'Pan\s+a\s+piso'))
+    add("Mermas y Polveo", "General", "Merma Manchado", _valor_linea(s_mc, r'manchado'))
+
+    # --- 7. MERMA DE MASA Y OTROS (kg) ---
+    s_mm = secciones.get("merma_masa", "")
+    add("Mermas y Polveo", "General", "Merma Cruda", _valor_linea(s_mm, r'Merma\s+de\s+masa'))
+    add("Mermas y Polveo", "General", "Reproceso", _valor_linea(s_mm, r'Reproceso'))
+    add("Mermas y Polveo", "General", "Barrido", _valor_linea(s_mm, r'Barrido'))
+
+    # --- 8. INSUMOS ---
+    s_ins = secciones.get("insumos", "")
+    add("Insumos", "General", "Semilla", _valor_linea(s_ins, r'Semilla\s+usada'))
+    add("Insumos", "General", "Harina", _valor_linea(s_ins, r'Harina\s+usada'))
+    add("Insumos", "General", "Polveo", _valor_linea(s_ins, r'Harina\s+polvor?eo'))
+    add("Insumos", "General", "Limpieza Insumos", _valor_linea(s_ins, r'Semilla\s+y\s+harina\s+de\s+limpieza'))
+
+    m_rec = re.search(r'(?im)Recuperado\s*[:=]([^\n]*)', s_ins)
+    if m_rec:
+        txt_rec = m_rec.group(1)
+        m_rs = re.search(r'(?i)semilla\s*[:=_]?\s*(\d+(?:[.,]\d+)?)', txt_rec)
+        m_rh = re.search(r'(?i)harina\s*[:=_]?\s*(\d+(?:[.,]\d+)?)', txt_rec)
+        if m_rs: add("Insumos", "General", "Semilla Recuperada", _num(m_rs.group(1)))
+        if m_rh: add("Insumos", "General", "Harina Recuperada", _num(m_rh.group(1)))
+
+    # --- 9. NOVEDADES ---
+    s_nov = secciones.get("novedades", "")
+    causa = _texto_linea(s_nov, r'Causa\s+principal\s+de\s+merma')
+    fallas = _texto_linea(s_nov, r'Detenciones\s+o\s+fallas')
+    if causa or fallas:
+        partes_nov = []
+        if causa: partes_nov.append(f"Causa principal de merma: {causa}")
+        if fallas: partes_nov.append(f"Detenciones o fallas: {fallas}")
+        novedades_final = " | ".join(partes_nov)
+    else:
+        lineas_nov = [re.sub(r'_+', '', l).strip() for l in s_nov.splitlines()[1:] if re.sub(r'_+', '', l).strip()]
+        novedades_final = " ".join(lineas_nov)
+
+    if len(detalles) == 0:
+        alertas.append("Sin métricas numéricas (posible plantilla vacía)")
+
+    return {
+        "fecha": fecha_iso,
+        "turno": turno,
+        "jefe_turno": jefe_turno,
+        "novedades": novedades_final,
+        "detalles": detalles,
+        "alertas": alertas,
+        "estado": "🟢 Listo" if not alertas else ("🔴 Vacío" if len(detalles) == 0 else "⚠️ Revisar"),
+        "incluir": len(detalles) > 0,
+        "texto_original": texto_crudo
+    }
+
+def auditar_duplicados(resultados, planta_id):
+    """Cruza los reportes contra Supabase y contra sí mismos para evitar choques."""
+    existentes_bd = set()
+    if planta_id:
+        try:
+            res = supabase.table("reporte_turnos").select("fecha, turno").eq("planta_id", planta_id).execute()
+            existentes_bd = {(r['fecha'], str(r['turno']).strip().lower()) for r in res.data}
+        except Exception:
+            pass
+
+    # Detectar duplicados dentro del mismo .txt (se queda con el último enviado, asumiendo corrección)
+    ultima_pos = {}
+    for idx, rep in enumerate(resultados):
+        clave = (rep['fecha'], rep['turno'].strip().lower())
+        ultima_pos[clave] = idx
+
+    for idx, rep in enumerate(resultados):
+        clave = (rep['fecha'], rep['turno'].strip().lower())
+        if clave in existentes_bd:
+            rep['estado'] = "🟡 Ya en BD"
+            rep['incluir'] = False
+            rep['alertas'].append("Turno ya registrado en Supabase")
+        elif ultima_pos[clave] != idx:
+            rep['estado'] = "🟠 Reemplazado"
+            rep['incluir'] = False
+            rep['alertas'].append("Hay una versión posterior de este mismo turno en el archivo")
+
+    return resultados
 
 def render_carga_whatsapp():
-    st.title("📥 Carga Automática desde WhatsApp (IA)")
-
-    if not client_ai:
-        st.error("⚠️ Falta configurar `GEMINI_API_KEY` en los Secrets de Streamlit.")
-        return
+    st.title("⚡ Carga Blindada desde WhatsApp")
 
     planta_sel = st.selectbox("🏭 Planta correspondiente a los reportes", nombres_plantas)
 
@@ -308,123 +541,189 @@ def render_carga_whatsapp():
 
     if texto_crudo:
         bloques = extraer_bloques_whatsapp(texto_crudo)
-        st.info(f"🔎 Se detectaron **{len(bloques)}** reportes de turno en el texto.")
+        st.info(f"🔎 Se detectaron **{len(bloques)}** mensajes con 'REPORTE DE TURNO'.")
 
         if len(bloques) > 0:
-            col_lim1, _ = st.columns([1, 2])
-            cantidad_proc = col_lim1.number_input(
-                "¿Cuántos reportes procesar (desde los más recientes)?",
-                min_value=1,
-                max_value=len(bloques),
-                value=min(len(bloques), 20),
-                step=1
-            )
-            bloques_a_procesar = bloques[-cantidad_proc:]
-
-            if st.button("🤖 Extraer Datos con IA", type="primary"):
-                resultados = []
-                barra = st.progress(0)
-                estado = st.empty()
-
-                for idx, bloque in enumerate(bloques_a_procesar):
-                    estado.text(f"Procesando reporte {idx + 1} de {len(bloques_a_procesar)}...")
-                    try:
-                        data_json = parsear_reporte_con_ia(bloque, nombres_areas, nombres_productos, nombres_metricas)
-                        data_json["incluir"] = True
-                        resultados.append(data_json)
-                        if len(bloques_a_procesar) > 5:
-                            time.sleep(0.5)
-                    except Exception as e:
-                        st.error(f"Error en reporte #{idx + 1}: {e}")
-                    barra.progress((idx + 1) / len(bloques_a_procesar))
-
-                estado.empty()
+            if st.button("⚡ Analizar y Validar Reportes", type="primary"):
+                inicio = time.time()
+                p_id = get_id(plantas_db, planta_sel)
+                resultados = [parsear_reporte_plantilla(txt, f_wa) for txt, f_wa in bloques]
+                resultados = auditar_duplicados(resultados, p_id)
+                duracion = time.time() - inicio
                 st.session_state.wa_resultados = resultados
                 st.session_state.wa_planta = planta_sel
+                st.success(f"✅ {len(resultados)} reportes analizados y auditados en **{duracion:.2f} segundos**.")
 
     if "wa_resultados" in st.session_state and st.session_state.wa_resultados:
+        res_list = st.session_state.wa_resultados
         st.divider()
-        st.subheader(f"🔍 Revisión previa ({len(st.session_state.wa_resultados)} reportes) — Planta: {st.session_state.wa_planta}")
-        st.caption("Puedes corregir cualquier dato directamente en las tablas o desmarcar reportes antes de guardar.")
+        st.subheader(f"📋 Panel de Validación — Planta: {st.session_state.wa_planta}")
 
-        for idx, rep in enumerate(st.session_state.wa_resultados):
-            titulo_exp = f"📅 {rep.get('fecha', 'Sin fecha')} | Turno: {rep.get('turno', '-')} | Jefe: {rep.get('jefe_turno', '-')}"
-            with st.expander(titulo_exp, expanded=(len(st.session_state.wa_resultados) <= 3)):
-                rep["incluir"] = st.checkbox("Guardar este reporte", value=rep.get("incluir", True), key=f"wa_inc_{idx}")
-                c1, c2, c3 = st.columns(3)
-                rep['fecha'] = c1.text_input("Fecha (YYYY-MM-DD)", rep.get('fecha', ''), key=f"wa_f_{idx}")
-                rep['turno'] = c2.text_input("Turno", rep.get('turno', ''), key=f"wa_t_{idx}")
-                rep['jefe_turno'] = c3.text_input("Jefe de Turno", rep.get('jefe_turno', ''), key=f"wa_j_{idx}")
-                rep['novedades'] = st.text_area("Novedades", rep.get('novedades', ''), key=f"wa_n_{idx}")
+        # KPIs de calidad de la carga
+        n_listos = sum(1 for r in res_list if r['estado'] == "🟢 Listo")
+        n_revisar = sum(1 for r in res_list if r['estado'] == "⚠️ Revisar")
+        n_dup = sum(1 for r in res_list if r['estado'] in ["🟡 Ya en BD", "🟠 Reemplazado"])
+        n_vacios = sum(1 for r in res_list if r['estado'] == "🔴 Vacío")
 
-                df_det = pd.DataFrame(rep.get('detalles', []))
-                if not df_det.empty:
-                    df_editado = st.data_editor(
-                        df_det,
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        column_config={
-                            "area": st.column_config.SelectboxColumn("Área", options=nombres_areas, required=True),
-                            "producto": st.column_config.SelectboxColumn("Producto", options=nombres_productos, required=True),
-                            "metrica": st.column_config.SelectboxColumn("Métrica", options=nombres_metricas, required=True),
-                            "sub_area": st.column_config.TextColumn("Línea / Máquina"),
-                            "valor": st.column_config.NumberColumn("Valor", min_value=0.0, format="%.2f")
-                        },
-                        key=f"wa_df_{idx}"
-                    )
-                    rep['detalles'] = df_editado.to_dict(orient="records")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("🟢 Listos", n_listos)
+        k2.metric("⚠️ Con alertas", n_revisar)
+        k3.metric("🟡 Ya en BD / Dup.", n_dup)
+        k4.metric("🔴 Vacíos", n_vacios)
 
+        # Tabla resumen liviana (no traba el navegador aunque sean 200 reportes)
+        df_resumen = pd.DataFrame([
+            {
+                "ID": i,
+                "Guardar": r["incluir"],
+                "Estado": r["estado"],
+                "Fecha": r["fecha"],
+                "Turno": r["turno"],
+                "Jefe": r["jefe_turno"] or "-",
+                "Datos": len(r["detalles"]),
+                "Observaciones": " | ".join(r["alertas"]) if r["alertas"] else "OK"
+            }
+            for i, r in enumerate(res_list)
+        ])
+
+        ocultar_bd = st.checkbox("Ocultar reportes que ya existen en BD o fueron reemplazados", value=True)
+        df_vista = df_resumen[~df_resumen["Estado"].isin(["🟡 Ya en BD", "🟠 Reemplazado"])] if ocultar_bd else df_resumen
+
+        df_resumen_edit = st.data_editor(
+            df_vista,
+            use_container_width=True,
+            hide_index=True,
+            disabled=["ID", "Estado", "Datos", "Observaciones"],
+            column_config={
+                "Guardar": st.column_config.CheckboxColumn("Guardar", default=True),
+                "Fecha": st.column_config.TextColumn("Fecha (YYYY-MM-DD)"),
+                "Turno": st.column_config.SelectboxColumn("Turno", options=["Mañana", "Tarde", "Noche", "Sin definir"]),
+            },
+            key="tabla_resumen_wa"
+        )
+
+        # Sincronizar cambios rápidos hechos en la tabla resumen
+        for _, row in df_resumen_edit.iterrows():
+            idx_r = int(row["ID"])
+            res_list[idx_r]["incluir"] = bool(row["Guardar"])
+            res_list[idx_r]["fecha"] = str(row["Fecha"]).strip()
+            res_list[idx_r]["turno"] = str(row["Turno"]).strip()
+            res_list[idx_r]["jefe_turno"] = "" if row["Jefe"] == "-" else str(row["Jefe"]).strip()
+
+        # Inspector puntual (evita renderizar 100 tablas a la vez)
+        st.divider()
+        st.subheader("🔍 Inspeccionar o corregir un reporte específico")
+        opciones_insp = [
+            f"#{i} | {r['estado']} | {r['fecha']} | {r['turno']} | {r['jefe_turno'] or 'Sin jefe'} ({len(r['detalles'])} datos)"
+            for i, r in enumerate(res_list)
+        ]
+        sel_insp = st.selectbox("Selecciona el reporte a revisar en detalle:", opciones_insp)
+        idx_sel = int(sel_insp.split("|")[0].replace("#", "").strip())
+        rep_sel = res_list[idx_sel]
+
+        if rep_sel["alertas"]:
+            st.warning("⚠️ Alertas detectadas: " + " • ".join(rep_sel["alertas"]))
+
+        col_ed, col_orig = st.columns([2, 1])
+        with col_ed:
+            rep_sel["novedades"] = st.text_area("Novedades", rep_sel.get("novedades", ""), key=f"nov_sel_{idx_sel}")
+            df_det = pd.DataFrame(rep_sel.get("detalles", []))
+            if df_det.empty:
+                df_det = pd.DataFrame(columns=["area", "producto", "metrica", "sub_area", "valor"])
+
+            df_det_edit = st.data_editor(
+                df_det,
+                num_rows="dynamic",
+                use_container_width=True,
+                column_config={
+                    "area": st.column_config.SelectboxColumn("Área", options=nombres_areas, required=True),
+                    "producto": st.column_config.SelectboxColumn("Producto", options=nombres_productos, required=True),
+                    "metrica": st.column_config.SelectboxColumn("Métrica", options=nombres_metricas, required=True),
+                    "sub_area": st.column_config.TextColumn("Línea / Máquina"),
+                    "valor": st.column_config.NumberColumn("Valor", min_value=0.0, format="%.2f")
+                },
+                key=f"det_sel_{idx_sel}"
+            )
+            rep_sel["detalles"] = df_det_edit.to_dict(orient="records")
+
+        with col_orig:
+            st.caption("📱 Mensaje original de WhatsApp")
+            st.text_area("Original", rep_sel.get("texto_original", ""), height=320, disabled=True, label_visibility="collapsed", key=f"orig_{idx_sel}")
+
+        # Botones finales de guardado
+        st.divider()
+        a_guardar = [r for r in res_list if r.get("incluir", False)]
         col_g1, col_g2 = st.columns([3, 1])
-        if col_g1.button("💾 Confirmar y Guardar en Supabase", type="primary", use_container_width=True):
+
+        if col_g1.button(f"💾 Confirmar y Guardar {len(a_guardar)} Reportes en Supabase", type="primary", use_container_width=True, disabled=(len(a_guardar) == 0)):
             p_id = get_id(plantas_db, st.session_state.wa_planta)
             guardados, omitidos, filas_descartadas = 0, 0, 0
+            barra = st.progress(0)
 
-            with st.spinner("Guardando reportes en Supabase..."):
-                for rep in st.session_state.wa_resultados:
-                    if not rep.get("incluir", True):
-                        continue
-                    try:
-                        data_turno = {
-                            "fecha": rep['fecha'],
-                            "planta_id": p_id,
-                            "turno": rep['turno'],
-                            "jefe_turno": rep.get('jefe_turno'),
-                            "novedades": rep.get('novedades')
-                        }
-                        res_t = supabase.table("reporte_turnos").insert(data_turno).execute()
-                        turno_id = res_t.data[0]['id']
+            for pos, rep in enumerate(a_guardar):
+                turno_id = None
+                try:
+                    # Validar formato estricto de fecha antes de tocar Supabase
+                    datetime.strptime(rep['fecha'], "%Y-%m-%d")
 
-                        detalles_insert = []
-                        for d in rep.get('detalles', []):
-                            a_id = get_id(areas_db, str(d.get('area', '')))
-                            pr_id = get_id(productos_db, str(d.get('producto', '')))
-                            m_id = get_id(metricas_db, str(d.get('metrica', '')))
-                            val = float(d.get('valor', 0)) if pd.notna(d.get('valor')) else 0.0
+                    if rep['turno'] == "Sin definir" or not rep['turno']:
+                        raise ValueError("El turno está 'Sin definir'. Corrígelo antes de guardar.")
 
-                            if a_id and pr_id and m_id and val > 0:
-                                sub_a = str(d.get('sub_area')).strip() if pd.notna(d.get('sub_area')) and str(d.get('sub_area')).strip() != "" else None
-                                detalles_insert.append({
-                                    "reporte_id": turno_id,
-                                    "area_id": a_id,
-                                    "producto_id": pr_id,
-                                    "metrica_id": m_id,
-                                    "sub_area": sub_a,
-                                    "valor": val
-                                })
-                            elif val > 0:
-                                filas_descartadas += 1
+                    detalles_insert = []
+                    for d in rep.get('detalles', []):
+                        a_id = get_id(areas_db, str(d.get('area', '')))
+                        pr_id = get_id(productos_db, str(d.get('producto', '')))
+                        m_id = get_id(metricas_db, str(d.get('metrica', '')))
+                        val = float(d.get('valor', 0)) if pd.notna(d.get('valor')) else 0.0
 
-                        if detalles_insert:
-                            supabase.table("reporte_detalles").insert(detalles_insert).execute()
-                        guardados += 1
-                    except Exception as e:
-                        omitidos += 1
-                        st.warning(f"⚠️ Turno {rep.get('fecha')} ({rep.get('turno')}) omitido (posible duplicado): {e}")
+                        if a_id and pr_id and m_id and val > 0:
+                            sub_a = str(d.get('sub_area')).strip() if pd.notna(d.get('sub_area')) and str(d.get('sub_area')).strip() not in ["", "None"] else None
+                            detalles_insert.append({
+                                "area_id": a_id,
+                                "producto_id": pr_id,
+                                "metrica_id": m_id,
+                                "sub_area": sub_a,
+                                "valor": val
+                            })
+                        elif val > 0:
+                            filas_descartadas += 1
 
-            st.success(f"✅ Listo: **{guardados}** reportes guardados, **{omitidos}** omitidos.")
+                    if not detalles_insert:
+                        raise ValueError("No tiene métricas válidas (> 0) para guardar.")
+
+                    data_turno = {
+                        "fecha": rep['fecha'],
+                        "planta_id": p_id,
+                        "turno": rep['turno'],
+                        "jefe_turno": rep.get('jefe_turno') or None,
+                        "novedades": rep.get('novedades') or None
+                    }
+                    res_t = supabase.table("reporte_turnos").insert(data_turno).execute()
+                    turno_id = res_t.data[0]['id']
+
+                    for d_ins in detalles_insert:
+                        d_ins["reporte_id"] = turno_id
+
+                    supabase.table("reporte_detalles").insert(detalles_insert).execute()
+                    guardados += 1
+
+                except Exception as e:
+                    # Rollback si se alcanzó a crear la cabecera pero falló el detalle
+                    if turno_id:
+                        try:
+                            supabase.table("reporte_turnos").delete().eq("id", turno_id).execute()
+                        except Exception:
+                            pass
+                    omitidos += 1
+                    st.warning(f"⚠️ Omitido {rep.get('fecha')} ({rep.get('turno')}): {e}")
+
+                barra.progress((pos + 1) / len(a_guardar))
+
+            st.success(f"✅ Proceso finalizado: **{guardados}** reportes guardados, **{omitidos}** omitidos.")
             if filas_descartadas > 0:
-                st.warning(f"ℹ️ Se omitieron {filas_descartadas} filas de detalle porque algún nombre no coincidió con las tablas maestras.")
-            del st.session_state.wa_resultados
+                st.info(f"ℹ️ {filas_descartadas} filas fueron ignoradas por no coincidir con el catálogo maestro.")
+            if guardados > 0:
+                del st.session_state.wa_resultados
 
         if col_g2.button("🗑️ Limpiar vista previa", use_container_width=True):
             del st.session_state.wa_resultados
@@ -488,12 +787,12 @@ def render_reporte_semanal():
             DATOS CONSOLIDADOS (Planta | Area | Metrica | Producto | Total):
             {resumen_metricas.to_string(index=False)}
 
-            NOVEDADES DE LOS JEFES DE TURNO:
+            NOVEDADES, CAUSAS DE MERMA Y FALLAS DE LOS JEFES DE TURNO:
             {novedades_unicas.to_string(index=False)}
 
             ESTRUCTURA OBLIGATORIA DEL INFORME:
             1. **Resumen Ejecutivo de Producción:** Balance de volumen (batches, horneado, cajas envasadas, consumo de insumos y dotación).
-            2. **Análisis de Mermas y Desviaciones (Pareto):** Identifica los principales focos de pérdida en kg y cruza los números con las novedades reportadas en piso (ej. problemas de pH, bandejas pegadas, reprocesos).
+            2. **Análisis de Mermas y Desviaciones (Pareto):** Identifica los principales focos de pérdida en kg y cruza los números con las causas de merma y detenciones reportadas en piso.
             3. **Objetivos de Gestión para la Semana Siguiente (3 a 5 objetivos SMART):** Cada objetivo debe tener:
                - Meta cuantificable o verificable.
                - Acción concreta en planta.
@@ -506,7 +805,6 @@ def render_reporte_semanal():
             try:
                 st.session_state.reporte_semanal_md = llamar_gemini_con_reintento(
                     prompt_semanal,
-                    es_json=False,
                     temperatura=0.2
                 )
             except Exception as e:
@@ -526,7 +824,7 @@ def render_reporte_semanal():
 # ==========================================
 # ENRUTAMIENTO PRINCIPAL
 # ==========================================
-if modo_app == "📥 Carga WhatsApp (IA)":
+if modo_app == "⚡ Carga WhatsApp (Plantilla)":
     render_carga_whatsapp()
     st.stop()
 elif modo_app == "📊 Reporte Semanal (IA)":
