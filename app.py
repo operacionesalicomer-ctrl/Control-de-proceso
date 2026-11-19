@@ -259,7 +259,7 @@ def parsear_reporte_con_ia(texto_reporte, areas, productos, metricas):
     """
 
     response = client_ai.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
@@ -491,7 +491,7 @@ def render_reporte_semanal():
 
             try:
                 resp = client_ai.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.8-flash",
                     contents=prompt_semanal,
                     config=types.GenerateContentConfig(temperature=0.2)
                 )
