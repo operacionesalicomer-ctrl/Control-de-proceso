@@ -628,4 +628,131 @@ def render_envasado():
         st.markdown(f"**📦 Envasado {i+1}**")
         v_prod = st.selectbox(f"Prod Envasado {i+1}", opciones_dinamicas, index=safe_index(opciones_dinamicas, get_val(f'env_prod_{i}', opciones_dinamicas[0])), key=f"tmp_ep_{i}", label_visibility="collapsed")
         set_val(f'env_prod_{i}', v_prod)
-        if v
+        if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
+            set_val(f'env_caj_{i}', st.number_input("Cajas", min_value=0, step=1, value=get_val(f'env_caj_{i}', 0), key=f"tmp_ec_{i}"))
+        st.divider()
+    if st.button("➕ Añadir otro producto a Envasado"):
+        set_val('envasado_count', count + 1)
+        st.rerun()
+
+def render_mermas():
+    st.caption("Registro final de mermas generales y harina de polveo.")
+    count = get_val('mermas_count', 1)
+    for i in range(count):
+        st.markdown(f"**🗑️ Registro {i+1}**")
+        v_prod = st.selectbox(f"Producto {i+1}", opciones_dinamicas, index=safe_index(opciones_dinamicas, get_val(f'merma_prod_{i}', opciones_dinamicas[0])), key=f"tmp_mermap_{i}", label_visibility="collapsed")
+        set_val(f'merma_prod_{i}', v_prod)
+        if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
+            c1, c2, c3 = st.columns(3)
+            set_val(f'merma_cruda_{i}', c1.number_input("Merma Cruda (kg)", min_value=0.0, step=0.5, value=get_val(f'merma_cruda_{i}', 0.0), key=f"tmp_mcr_{i}"))
+            set_val(f'merma_horneada_{i}', c2.number_input("Merma Horneada (kg)", min_value=0.0, step=0.5, value=get_val(f'merma_horneada_{i}', 0.0), key=f"tmp_mho_{i}"))
+            set_val(f'polveo_{i}', c3.number_input("Harina de Polveo/Barrido (kg)", min_value=0.0, step=0.5, value=get_val(f'polveo_{i}', 0.0), key=f"tmp_mpol_{i}"))
+        st.divider()
+    if st.button("➕ Añadir otro registro de mermas"):
+        set_val('mermas_count', count + 1)
+        st.rerun()
+
+pasos_nombres = ["Apertura de Turno", "Masa", "Cámara", "Corte", "Horno", "Envasado", "Mermas y Polveo"]
+paso_actual = get_val('paso_actual', 0)
+
+st.title("Registro de Producción Integral")
+st.progress(paso_actual / (len(pasos_nombres) - 1))
+st.header(f"Paso {paso_actual + 1}: {pasos_nombres[paso_actual]}")
+st.divider()
+
+if paso_actual == 0: render_apertura()
+elif paso_actual == 1: render_masa()
+elif paso_actual == 2: render_camara()
+elif paso_actual == 3: render_corte()
+elif paso_actual == 4: render_horno()
+elif paso_actual == 5: render_envasado()
+elif paso_actual == 6: render_mermas()
+
+st.divider()
+
+col_izq, col_der = st.columns(2)
+
+with col_izq:
+    if paso_actual > 0:
+        if st.button("⬅️ Atrás", use_container_width=True):
+            set_val('paso_actual', paso_actual - 1)
+            st.rerun()
+
+with col_der:
+    if paso_actual < len(pasos_nombres) - 1:
+        if st.button("Siguiente ➡️", type="primary", use_container_width=True):
+            set_val('paso_actual', paso_actual + 1)
+            st.rerun()
+    else:
+        if st.button("💾 Guardar Reporte Completo", type="primary", use_container_width=True):
+            planta_id = get_id(plantas_db, get_val('planta', ''))
+            turno_final = f"{get_val('letra_turno', 'A')}{get_val('num_turno', '1')}"
+            data_turno = {"fecha": str(get_val('fecha', datetime.now())), "planta_id": planta_id, "turno": turno_final}
+
+            try:
+                res_turno = supabase.table("reporte_turnos").insert(data_turno).execute()
+                turno_id = res_turno.data[0]['id']
+                detalles_a_insertar = []
+
+                def agregar_detalle(area, prod, metrica, valor, sub_area=None):
+                    if valor > 0 and prod not in ["Línea Detenida", "Seleccione un producto...", ""]:
+                        detalles_a_insertar.append({
+                            "reporte_id": turno_id, "area_id": get_id(areas_db, area),
+                            "producto_id": get_id(productos_db, prod), "metrica_id": get_id(metricas_db, metrica),
+                            "sub_area": sub_area, "valor": valor
+                        })
+
+                if get_val('dotacion_masa', 0) > 0: agregar_detalle("Masa", "General", "Operarios", get_val('dotacion_masa', 0))
+                if get_val('dotacion_camara', 0) > 0: agregar_detalle("Cámara", "General", "Operarios", get_val('dotacion_camara', 0))
+                for linea in ["C1", "C2", "C3", "Kornspitz", "Amasado"]:
+                    if get_val(f'dotacion_corte_{linea}', 0) > 0:
+                        agregar_detalle("Corte", "General", "Operarios", get_val(f'dotacion_corte_{linea}', 0), linea)
+                if get_val('dotacion_horno', 0) > 0: agregar_detalle("Horno", "General", "Operarios", get_val('dotacion_horno', 0))
+                if get_val('dotacion_envasado', 0) > 0: agregar_detalle("Envasado", "General", "Operarios", get_val('dotacion_envasado', 0))
+
+                for i in range(get_val('masa_count', 1)):
+                    p = get_val(f'masa_prod_{i}', '')
+                    agregar_detalle("Masa", p, "Batch", get_val(f'masa_batch_{i}', 0))
+                    agregar_detalle("Masa", p, "Reproceso", get_val(f'masa_rep_{i}', 0))
+
+                for i in range(get_val('camara_count', 1)):
+                    p = get_val(f'cam_prod_{i}', '')
+                    agregar_detalle("Cámara", p, "Batch", get_val(f'cam_bat_{i}', 0))
+                    agregar_detalle("Cámara", p, "Reproceso", get_val(f'cam_rep_{i}', 0))
+
+                for linea in ["C1", "C2", "C3", "Kornspitz", "Amasado"]:
+                    count_linea = get_val(f'corte_count_{linea}', 1)
+                    for i in range(count_linea):
+                        p = get_val(f'corte_prod_{linea}_{i}', '')
+                        semilla_kg = get_val(f'corte_sem_{linea}_{i}', 0.0) * 25
+                        agregar_detalle("Corte", p, "Batch", get_val(f'corte_bat_{linea}_{i}', 0), linea)
+                        agregar_detalle("Corte", p, "Carros", get_val(f'corte_car_{linea}_{i}', 0), linea)
+                        agregar_detalle("Corte", p, "Semilla", semilla_kg, linea)
+
+                for i in range(get_val('horno_count', 1)):
+                    p = get_val(f'horno_prod_{i}', '')
+                    agregar_detalle("Horno", p, "Carros", get_val(f'horno_car_{i}', 0))
+                    agregar_detalle("Horno", p, "Abatidor", get_val(f'horno_aba_{i}', 0))
+                    agregar_detalle("Horno", p, "Crudo", get_val(f'horno_cru_{i}', 0))
+
+                for i in range(get_val('envasado_count', 1)):
+                    p = get_val(f'env_prod_{i}', '')
+                    agregar_detalle("Envasado", p, "Cajas", get_val(f'env_caj_{i}', 0))
+
+                for i in range(get_val('mermas_count', 1)):
+                    p = get_val(f'merma_prod_{i}', '')
+                    agregar_detalle("Mermas y Polveo", p, "Merma Cruda", get_val(f'merma_cruda_{i}', 0.0))
+                    agregar_detalle("Mermas y Polveo", p, "Merma Horneada", get_val(f'merma_horneada_{i}', 0.0))
+                    agregar_detalle("Mermas y Polveo", p, "Polveo", get_val(f'polveo_{i}', 0.0))
+
+                if detalles_a_insertar:
+                    supabase.table("reporte_detalles").insert(detalles_a_insertar).execute()
+
+                st.success(f"✅ Reporte guardado exitosamente. Turno: {turno_final} (Folio interno: {turno_id})")
+                st.balloons()
+
+                st.session_state.form_data = {}
+                set_val('paso_actual', 0)
+
+            except Exception as e:
+                st.error(f"Error al guardar. Si el turno ya existe, no se puede duplicar. Detalle técnico: {e}")
