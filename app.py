@@ -222,7 +222,7 @@ with st.sidebar:
                         st.error(f"❌ Error leyendo el archivo. Detalle: {e}")
 
 # ==========================================
-# MÓDULO A: PARSER BLINDADO DE WHATSAPP
+# MÓDULO A: PARSER BLINDADO LÍNEA POR LÍNEA
 # ==========================================
 def _validar_fecha_dmy(d_str, m_str, y_str):
     """Valida y normaliza una fecha D/M/Y a YYYY-MM-DD. Devuelve None si es imposible."""
@@ -237,7 +237,6 @@ def _validar_fecha_dmy(d_str, m_str, y_str):
 
 def extraer_bloques_whatsapp(texto_completo):
     """Separa un chat exportado (.txt) y devuelve lista de (texto_mensaje, fecha_chat_fallback)."""
-    # Limpiar caracteres invisibles que mete WhatsApp iOS (\u200e, \u202f, \ufeff)
     texto_limpio = texto_completo.replace("\u200e", "").replace("\u202f", " ").replace("\ufeff", "")
     patron_mensaje = r'(?=\[?\d{1,2}[/-]\d{1,2}[/-]\d{2,4},?\s+\d{1,2}:\d{2})'
     mensajes = re.split(patron_mensaje, texto_limpio)
@@ -247,7 +246,6 @@ def extraer_bloques_whatsapp(texto_completo):
         m_strip = m.strip()
         if "REPORTE DE TURNO" not in m_strip.upper():
             continue
-        # Capturar fecha del timestamp de WhatsApp como respaldo
         m_ts = re.match(r'^\[?(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', m_strip)
         fecha_wa = _validar_fecha_dmy(*m_ts.groups()) if m_ts else None
         resultados.append((m_strip, fecha_wa))
@@ -256,59 +254,71 @@ def extraer_bloques_whatsapp(texto_completo):
         resultados.append((texto_limpio.strip(), None))
     return resultados
 
-def _limpiar_md(texto):
-    """Elimina negritas/tachados de WhatsApp (* y ~) que rompen búsquedas de etiquetas."""
-    return texto.replace("*", "").replace("~", "")
+def _limpiar_texto(texto):
+    """Elimina negritas/tachados de WhatsApp y junta decimales separados por espacio (ej. '14 ,60' -> '14,60')."""
+    t = texto.replace("*", "").replace("~", "")
+    t = re.sub(r'(\d)[ \t]+([.,])[ \t]*(\d)', r'\1\2\3', t)
+    t = re.sub(r'(\d)[ \t]*([.,])[ \t]+(\d)', r'\1\2\3', t)
+    return t
 
 def _num(texto):
-    """Extrae el primer número positivo válido (entero o decimal). Ignora guiones o texto puro."""
+    """Extrae el primer número positivo válido (entero o decimal)."""
     if not texto:
         return 0.0
-    # Eliminar placeholders tipo __ o ---
     limpio = re.sub(r'[_\-]+', ' ', texto).strip()
     m = re.search(r'(\d+(?:[.,]\d+)?)', limpio)
     if not m:
         return 0.0
     try:
         val = float(m.group(1).replace(',', '.'))
-        # Filtro anti-absurdos (ej. pegaron un RUT o teléfono por error)
         if val <= 0 or val > 50000:
             return 0.0
         return val
     except ValueError:
         return 0.0
 
-def _valor_linea(bloque, patron_etiqueta):
-    """Busca una etiqueta y extrae el número de esa línea."""
-    m = re.search(rf'(?im)^[^\n]*{patron_etiqueta}[^\n:]*[:=]?\s*([^\n]*)', bloque)
-    if not m:
+def _suma_nums(texto):
+    """Si hay sumas tipo '6 rústico + 11 europastry', suma el primer número de cada término."""
+    if not texto:
         return 0.0
-    return _num(m.group(1))
+    limpio = re.sub(r'[_\-]+', ' ', texto).strip()
+    if '+' in limpio:
+        return sum(_num(p) for p in limpio.split('+'))
+    return _num(limpio)
+
+def _valor_linea(bloque, patron_etiqueta, sumar_mas=False):
+    """Evalúa ESTRICTAMENTE línea por línea. Nunca salta ni roba números de la línea siguiente."""
+    for linea in bloque.splitlines():
+        m = re.match(rf'^[ \t]*(?:{patron_etiqueta})(?:[ \t]*\([^)]*\))?[ \t]*[:=]?[ \t]*(.*)$', linea, flags=re.IGNORECASE)
+        if m:
+            resto = m.group(1).strip()
+            return _suma_nums(resto) if sumar_mas else _num(resto)
+    return 0.0
 
 def _texto_linea(bloque, patron_etiqueta):
-    """Busca una etiqueta y devuelve el texto limpio sin guiones bajos de plantilla."""
-    m = re.search(rf'(?im)^[^\n]*{patron_etiqueta}[^\n:]*[:=]\s*([^\n]*)', bloque)
-    if not m:
-        return ""
-    limpio = re.sub(r'_+', '', m.group(1)).strip(" -:|.")
-    return limpio
+    """Busca una etiqueta en una sola línea y devuelve el texto limpio."""
+    for linea in bloque.splitlines():
+        m = re.match(rf'^[ \t]*(?:{patron_etiqueta})[ \t]*[:=][ \t]*(.*)$', linea, flags=re.IGNORECASE)
+        if m:
+            return re.sub(r'_+', '', m.group(1)).strip(" -:|.")
+    return ""
 
 def parsear_reporte_plantilla(texto_crudo, fecha_wa_fallback=None):
-    """Parser blindado 1:1 para la plantilla oficial y tolerante a variantes antiguas."""
-    texto = _limpiar_md(texto_crudo)
+    """Parser blindado línea por línea tolerante a typos y variantes reales de planta."""
+    texto = _limpiar_texto(texto_crudo)
     alertas = []
 
-    # Dividir por secciones (tolera con o sin número, puntos, paréntesis o guiones)
+    # Secciones tolerantes a espacios internos (ej. "MER  MA"), singular/plural ("NOVEDAD") y numeración
     patrones_sec = [
-        ("masas", r'(?im)^\s*(?:1\s*[\.\-\)]\s*)?MASAS\b'),
-        ("camara", r'(?im)^\s*(?:2\s*[\.\-\)]\s*)?C[AÁ]MARA\b'),
-        ("corte", r'(?im)^\s*(?:3\s*[\.\-\)]\s*)?CORTE\b'),
-        ("horno", r'(?im)^\s*(?:4\s*[\.\-\)]\s*)?HORNO\b'),
-        ("envasado", r'(?im)^\s*(?:5\s*[\.\-\)]\s*)?ENVASADO\b'),
-        ("merma_cocido", r'(?im)^\s*(?:6\s*[\.\-\)]\s*)?MERMA\s+PAN\b'),
-        ("merma_masa", r'(?im)^\s*(?:7\s*[\.\-\)]\s*)?MERMA\s+DE\s+MASA\b'),
-        ("insumos", r'(?im)^\s*(?:[58]\s*[\.\-\)]\s*)?INSUMOS\b'),
-        ("novedades", r'(?im)^\s*(?:9\s*[\.\-\)]\s*)?NOVEDADES\b'),
+        ("masas", r'(?im)^[ \t]*(?:1[ \t]*[\.\-\)][ \t]*)?MASAS?\b'),
+        ("camara", r'(?im)^[ \t]*(?:2[ \t]*[\.\-\)][ \t]*)?C[AÁ]MARAS?\b'),
+        ("corte", r'(?im)^[ \t]*(?:3[ \t]*[\.\-\)][ \t]*)?CORTES?\b'),
+        ("horno", r'(?im)^[ \t]*(?:4[ \t]*[\.\-\)][ \t]*)?HORNOS?\b'),
+        ("envasado", r'(?im)^[ \t]*(?:5[ \t]*[\.\-\)][ \t]*)?ENVASADOS?\b'),
+        ("merma_cocido", r'(?im)^[ \t]*(?:6[ \t]*[\.\-\)][ \t]*)?MER[ \t]*MA[ \t]+PAN\b'),
+        ("merma_masa", r'(?im)^[ \t]*(?:7[ \t]*[\.\-\)][ \t]*)?MER[ \t]*MA[ \t]+DE[ \t]+MASA\b'),
+        ("insumos", r'(?im)^[ \t]*(?:[58][ \t]*[\.\-\)][ \t]*)?INSUMOS?\b'),
+        ("novedades", r'(?im)^[ \t]*(?:9[ \t]*[\.\-\)][ \t]*)?NOVEDAD(?:ES)?\b'),
     ]
 
     posiciones = []
@@ -342,7 +352,7 @@ def parsear_reporte_plantilla(texto_crudo, fecha_wa_fallback=None):
 
     # --- CABECERA ---
     hdr = secciones.get("header", "")
-    m_fecha = re.search(r'(?i)Fecha\s*[:=]?\s*(\d{1,2})\s*[/\-\.]\s*(\d{1,2})\s*[/\-\.]\s*(\d{2,4})', hdr)
+    m_fecha = re.search(r'(?i)Fecha[ \t]*[:=]?[ \t]*(\d{1,2})[ \t]*[/\-\.][ \t]*(\d{1,2})[ \t]*[/\-\.][ \t]*(\d{2,4})', hdr)
     fecha_iso = _validar_fecha_dmy(*m_fecha.groups()) if m_fecha else None
 
     if not fecha_iso:
@@ -373,101 +383,129 @@ def parsear_reporte_plantilla(texto_crudo, fecha_wa_fallback=None):
         turno = "Sin definir"
         alertas.append("Turno vacío")
 
-    jefe_turno = _texto_linea(hdr, r'Jefe\s+de\s+turno').title()
+    jefe_turno = _texto_linea(hdr, r'Jefe[ \t]+de[ \t]+turno').title()
     if not jefe_turno:
         alertas.append("Falta Jefe de turno")
 
-    # Dotación en cabecera o al final del mensaje (formato antiguo)
     dotacion_total = _valor_linea(hdr, r'Dotaci[oó]n')
     if dotacion_total == 0:
-        m_dot_alt = re.search(r'(?i)(?:se\s+trabaj[oó]\s+con|dotaci[oó]n(?:\s+personal)?)\s*[:=]?\s*(\d+)\s*personas?', texto)
+        m_dot_alt = re.search(r'(?i)(?:se[ \t]+trabaj[oó][ \t]+con|dotaci[oó]n(?:[ \t]+personal)?)[ \t]*[:=]?[ \t]*(\d+)[ \t]*personas?', texto)
         if m_dot_alt:
             dotacion_total = float(m_dot_alt.group(1))
-    if dotacion_total > 0:
-        add("General", "General", "Operarios", dotacion_total)
+    add("General", "General", "Operarios", dotacion_total)
 
     # --- 1. MASAS (batch) ---
     s_masas = secciones.get("masas", "")
     add("Masa", "Integral", "Batch", _valor_linea(s_masas, r'Integral'))
-    add("Masa", "Rustica", "Batch", _valor_linea(s_masas, r'R[uú]stica'))
+    add("Masa", "Rustica", "Batch", _valor_linea(s_masas, r'R[uú]stic[ao]'))
     add("Masa", "Toscano", "Batch", _valor_linea(s_masas, r'Toscano'))
+    add("Masa", "Europastry", "Batch", _valor_linea(s_masas, r'Europastr[iy]'))
     add("Masa", "Otros", "Batch", _valor_linea(s_masas, r'Otros?'))
     add("Masa", "General", "Reproceso", _valor_linea(s_masas, r'Reproceso'))
 
     # --- 2. CÁMARA (batch) ---
     s_cam = secciones.get("camara", "")
     add("Cámara", "Integral", "Batch", _valor_linea(s_cam, r'Integral'))
-    add("Cámara", "Rustica", "Batch", _valor_linea(s_cam, r'R[uú]stica'))
+    add("Cámara", "Rustica", "Batch", _valor_linea(s_cam, r'R[uú]stic[ao]'))
     add("Cámara", "Toscano", "Batch", _valor_linea(s_cam, r'Toscano'))
+    add("Cámara", "Europastry", "Batch", _valor_linea(s_cam, r'Europastr[iy]'))
     add("Cámara", "General", "Reproceso", _valor_linea(s_cam, r'Reproceso'))
 
     # --- 3. CORTE ---
     s_corte = secciones.get("corte", "")
-    for linea in ["C1", "C2", "C3"]:
-        m_lin = re.search(rf'(?im)^\s*{linea}\s*[:\-]([^\n]*)', s_corte)
-        if m_lin:
-            txt_l = m_lin.group(1)
-            m_b = re.search(r'(?i)batch\s*[:=_]?\s*(\d+(?:[.,]\d+)?)', txt_l)
-            m_r = re.search(r'(?i)reproce(?:so)?\s*[:=_]?\s*(\d+(?:[.,]\d+)?)', txt_l)
-            m_c = re.search(r'(?i)carros?\s*[:=_]?\s*(\d+(?:[.,]\d+)?)', txt_l)
-            m_d = re.search(r'(?i)dotaci[oó]n\s*[:=_]?\s*(\d+(?:[.,]\d+)?)', txt_l)
-            if m_b: add("Corte", "General", "Batch", _num(m_b.group(1)), linea)
-            if m_r: add("Corte", "General", "Reproceso", _num(m_r.group(1)), linea)
-            if m_c: add("Corte", "General", "Carros", _num(m_c.group(1)), linea)
-            if m_d: add("Corte", "General", "Operarios", _num(m_d.group(1)), linea)
+    batch_por_linea = False
+    for num_l in ["1", "2", "3"]:
+        linea_nom = f"C{num_l}"
+        for lin in s_corte.splitlines():
+            m_lin = re.match(rf'^[ \t]*C[ \t]*{num_l}[ \t]*[:\-](.*)$', lin, flags=re.IGNORECASE)
+            if m_lin:
+                txt_l = m_lin.group(1)
+                m_b = re.search(r'(?i)ba(?:t)?ch[ \t]*[:=_]?[ \t]*(\d+(?:[.,]\d+)?)', txt_l)
+                m_r = re.search(r'(?i)reproce(?:so)?[ \t]*[:=_]?[ \t]*(\d+(?:[.,]\d+)?)', txt_l)
+                m_d = re.search(r'(?i)dotaci[oó]n[ \t]*[:=_]?[ \t]*(\d+(?:[.,]\d+)?)', txt_l)
+                txt_sin_dot = re.split(r'(?i)dotaci[oó]n', txt_l)[0]
+                m_c = re.search(r'(?i)carros?[ \t]*[:=_]?[ \t]*([^|/]*)', txt_sin_dot)
+                if m_b:
+                    add("Corte", "General", "Batch", _num(m_b.group(1)), linea_nom)
+                    batch_por_linea = True
+                if m_r:
+                    add("Corte", "General", "Reproceso", _num(m_r.group(1)), linea_nom)
+                if m_c:
+                    add("Corte", "General", "Carros", _suma_nums(m_c.group(1)), linea_nom)
+                if m_d:
+                    add("Corte", "General", "Operarios", _num(m_d.group(1)), linea_nom)
+
+    if not batch_por_linea:
+        for lin in s_corte.splitlines():
+            m_tb = re.search(r'(?i)Total[ \t]+(?:de[ \t]+)?ba(?:t)?ch(?:es)?[ \t]*[:=]?[ \t]*(\d+(?:[.,]\d+)?)', lin)
+            if m_tb:
+                add("Corte", "General", "Batch", _num(m_tb.group(1)), None)
+                m_tr = re.search(r'(?i)(\d+(?:[.,]\d+)?)[ \t]*reproce', lin)
+                if m_tr:
+                    add("Corte", "General", "Reproceso", _num(m_tr.group(1)), None)
 
     # --- 4. HORNO (carros) ---
     s_horno = secciones.get("horno", "")
-    add("Horno", "General", "Carros", _valor_linea(s_horno, r'Horneados'))
-    add("Horno", "General", "Abatidor", _valor_linea(s_horno, r'A\s+abatidor'))
-    add("Horno", "General", "Ultracongelado", _valor_linea(s_horno, r'(?:A\s+)?ultra\s*co[ng]+elado'))
-    add("Horno", "General", "Crudo", _valor_linea(s_horno, r'Quedan\s+por\s+hornear'))
+    h_rus = _valor_linea(s_horno, r'R[uú]stic[ao]')
+    h_tos = _valor_linea(s_horno, r'Toscano')
+    h_int = _valor_linea(s_horno, r'Integral')
+    h_eur = _valor_linea(s_horno, r'Europastr[iy]')
+    if any([h_rus, h_tos, h_int, h_eur]):
+        add("Horno", "Rustica", "Carros", h_rus)
+        add("Horno", "Toscano", "Carros", h_tos)
+        add("Horno", "Integral", "Carros", h_int)
+        add("Horno", "Europastry", "Carros", h_eur)
+    else:
+        add("Horno", "General", "Carros", _valor_linea(s_horno, r'Horneados'))
+
+    add("Horno", "General", "Abatidor", _valor_linea(s_horno, r'(?:A[ \t]+)?abatidor', sumar_mas=True))
+    add("Horno", "General", "Ultracongelado", _valor_linea(s_horno, r'(?:A[ \t]+)?ultra[ \t]*co[ng]+elado', sumar_mas=True))
+    add("Horno", "General", "Crudo", _valor_linea(s_horno, r'Quedan[ \t]+por[ \t]+hornear|Crudos?'))
 
     # --- 5. ENVASADO (cajas) ---
     s_env = secciones.get("envasado", "")
     add("Envasado", "Integral", "Cajas", _valor_linea(s_env, r'Integral'))
-    val_rf = _valor_linea(s_env, r'R[uú]stica\s+familiar')
-    if val_rf > 0:
-        add("Envasado", "Rustica Familiar", "Cajas", val_rf)
-    else:
-        add("Envasado", "Rustica", "Cajas", _valor_linea(s_env, r'R[uú]stica(?!\s+c[oó]ctel)'))
+    add("Envasado", "Rustica Familiar", "Cajas", _valor_linea(s_env, r'R[uú]stic[ao][ \t]+familiar'))
+    add("Envasado", "Rustica", "Cajas", _valor_linea(s_env, r'R[uú]stic[ao](?![ \t]+(?:familiar|c[oó]ctel))'))
     add("Envasado", "Toscano", "Cajas", _valor_linea(s_env, r'Toscano'))
+    add("Envasado", "Europastry", "Cajas", _valor_linea(s_env, r'Europastr[iy]'))
     add("Envasado", "Otros", "Cajas", _valor_linea(s_env, r'Otros?'))
 
     # --- 6. MERMA PAN COCIDO (kg) ---
     s_mc = secciones.get("merma_cocido", "")
     add("Mermas y Polveo", "General", "Merma Deforme", _valor_linea(s_mc, r'Deforme'))
-    add("Mermas y Polveo", "General", "Merma Sin Greña", _valor_linea(s_mc, r'Sin\s+gre[ñn]a'))
+    add("Mermas y Polveo", "General", "Merma Sin Greña", _valor_linea(s_mc, r'Sin[ \t]+gre[ñn]a'))
     add("Mermas y Polveo", "General", "Merma Crudo", _valor_linea(s_mc, r'Crudo'))
-    add("Mermas y Polveo", "General", "Merma Sobre Cocción", _valor_linea(s_mc, r'Sobre\s+cocci[oó]n'))
-    add("Mermas y Polveo", "General", "Merma Pan a Piso", _valor_linea(s_mc, r'Pan\s+a\s+piso'))
-    add("Mermas y Polveo", "General", "Merma Manchado", _valor_linea(s_mc, r'manchado'))
+    add("Mermas y Polveo", "General", "Merma Sobre Cocción", _valor_linea(s_mc, r'Sobre[ \t]+cocci[oó]n'))
+    add("Mermas y Polveo", "General", "Merma Pan a Piso", _valor_linea(s_mc, r'(?:Pan[ \t]+)?a(?:l)?[ \t]+piso'))
+    add("Mermas y Polveo", "General", "Merma Manchado", _valor_linea(s_mc, r'(?:Merma[ \t]+pan[ \t]+)?manchado'))
 
     # --- 7. MERMA DE MASA Y OTROS (kg) ---
     s_mm = secciones.get("merma_masa", "")
-    add("Mermas y Polveo", "General", "Merma Cruda", _valor_linea(s_mm, r'Merma\s+de\s+masa'))
+    add("Mermas y Polveo", "General", "Merma Cruda", _valor_linea(s_mm, r'Merma[ \t]+de[ \t]+masa'))
     add("Mermas y Polveo", "General", "Reproceso", _valor_linea(s_mm, r'Reproceso'))
     add("Mermas y Polveo", "General", "Barrido", _valor_linea(s_mm, r'Barrido'))
 
     # --- 8. INSUMOS ---
     s_ins = secciones.get("insumos", "")
-    add("Insumos", "General", "Semilla", _valor_linea(s_ins, r'Semilla\s+usada'))
-    add("Insumos", "General", "Harina", _valor_linea(s_ins, r'Harina\s+usada'))
-    add("Insumos", "General", "Polveo", _valor_linea(s_ins, r'Harina\s+polvor?eo'))
-    add("Insumos", "General", "Limpieza Insumos", _valor_linea(s_ins, r'Semilla\s+y\s+harina\s+de\s+limpieza'))
+    add("Insumos", "General", "Semilla", _valor_linea(s_ins, r'Semilla[ \t]+usada'))
+    add("Insumos", "General", "Harina", _valor_linea(s_ins, r'Harina[ \t]+usada'))
+    add("Insumos", "General", "Polveo", _valor_linea(s_ins, r'Harina[ \t]+polvor?eo'))
+    add("Insumos", "General", "Limpieza Insumos", _valor_linea(s_ins, r'Semilla[ \t]+y[ \t]+harina[ \t]+de[ \t]+limpieza'))
 
-    m_rec = re.search(r'(?im)Recuperado\s*[:=]([^\n]*)', s_ins)
-    if m_rec:
-        txt_rec = m_rec.group(1)
-        m_rs = re.search(r'(?i)semilla\s*[:=_]?\s*(\d+(?:[.,]\d+)?)', txt_rec)
-        m_rh = re.search(r'(?i)harina\s*[:=_]?\s*(\d+(?:[.,]\d+)?)', txt_rec)
-        if m_rs: add("Insumos", "General", "Semilla Recuperada", _num(m_rs.group(1)))
-        if m_rh: add("Insumos", "General", "Harina Recuperada", _num(m_rh.group(1)))
+    for lin in s_ins.splitlines():
+        m_rec = re.match(r'^[ \t]*Recuperado[ \t]*[:=](.*)$', lin, flags=re.IGNORECASE)
+        if m_rec:
+            txt_rec = m_rec.group(1)
+            m_rs = re.search(r'(?i)semilla[ \t]*[:=_]?[ \t]*(\d+(?:[.,]\d+)?)', txt_rec)
+            m_rh = re.search(r'(?i)harina[ \t]*[:=_]?[ \t]*(\d+(?:[.,]\d+)?)', txt_rec)
+            if m_rs: add("Insumos", "General", "Semilla Recuperada", _num(m_rs.group(1)))
+            if m_rh: add("Insumos", "General", "Harina Recuperada", _num(m_rh.group(1)))
 
     # --- 9. NOVEDADES ---
     s_nov = secciones.get("novedades", "")
-    causa = _texto_linea(s_nov, r'Causa\s+principal\s+de\s+merma')
-    fallas = _texto_linea(s_nov, r'Detenciones\s+o\s+fallas')
+    causa = _texto_linea(s_nov, r'Causa[ \t]+principal[ \t]+de[ \t]+merma')
+    fallas = _texto_linea(s_nov, r'Detenciones[ \t]+o[ \t]+fallas')
     if causa or fallas:
         partes_nov = []
         if causa: partes_nov.append(f"Causa principal de merma: {causa}")
@@ -475,7 +513,7 @@ def parsear_reporte_plantilla(texto_crudo, fecha_wa_fallback=None):
         novedades_final = " | ".join(partes_nov)
     else:
         lineas_nov = [re.sub(r'_+', '', l).strip() for l in s_nov.splitlines()[1:] if re.sub(r'_+', '', l).strip()]
-        novedades_final = " ".join(lineas_nov)
+        novedades_final = " | ".join(lineas_nov)
 
     if len(detalles) == 0:
         alertas.append("Sin métricas numéricas (posible plantilla vacía)")
@@ -502,7 +540,6 @@ def auditar_duplicados(resultados, planta_id):
         except Exception:
             pass
 
-    # Detectar duplicados dentro del mismo .txt (se queda con el último enviado, asumiendo corrección)
     ultima_pos = {}
     for idx, rep in enumerate(resultados):
         clave = (rep['fecha'], rep['turno'].strip().lower())
@@ -559,7 +596,6 @@ def render_carga_whatsapp():
         st.divider()
         st.subheader(f"📋 Panel de Validación — Planta: {st.session_state.wa_planta}")
 
-        # KPIs de calidad de la carga
         n_listos = sum(1 for r in res_list if r['estado'] == "🟢 Listo")
         n_revisar = sum(1 for r in res_list if r['estado'] == "⚠️ Revisar")
         n_dup = sum(1 for r in res_list if r['estado'] in ["🟡 Ya en BD", "🟠 Reemplazado"])
@@ -571,7 +607,6 @@ def render_carga_whatsapp():
         k3.metric("🟡 Ya en BD / Dup.", n_dup)
         k4.metric("🔴 Vacíos", n_vacios)
 
-        # Tabla resumen liviana (no traba el navegador aunque sean 200 reportes)
         df_resumen = pd.DataFrame([
             {
                 "ID": i,
@@ -602,7 +637,6 @@ def render_carga_whatsapp():
             key="tabla_resumen_wa"
         )
 
-        # Sincronizar cambios rápidos hechos en la tabla resumen
         for _, row in df_resumen_edit.iterrows():
             idx_r = int(row["ID"])
             res_list[idx_r]["incluir"] = bool(row["Guardar"])
@@ -610,7 +644,6 @@ def render_carga_whatsapp():
             res_list[idx_r]["turno"] = str(row["Turno"]).strip()
             res_list[idx_r]["jefe_turno"] = "" if row["Jefe"] == "-" else str(row["Jefe"]).strip()
 
-        # Inspector puntual (evita renderizar 100 tablas a la vez)
         st.divider()
         st.subheader("🔍 Inspeccionar o corregir un reporte específico")
         opciones_insp = [
@@ -650,7 +683,6 @@ def render_carga_whatsapp():
             st.caption("📱 Mensaje original de WhatsApp")
             st.text_area("Original", rep_sel.get("texto_original", ""), height=320, disabled=True, label_visibility="collapsed", key=f"orig_{idx_sel}")
 
-        # Botones finales de guardado
         st.divider()
         a_guardar = [r for r in res_list if r.get("incluir", False)]
         col_g1, col_g2 = st.columns([3, 1])
@@ -663,7 +695,6 @@ def render_carga_whatsapp():
             for pos, rep in enumerate(a_guardar):
                 turno_id = None
                 try:
-                    # Validar formato estricto de fecha antes de tocar Supabase
                     datetime.strptime(rep['fecha'], "%Y-%m-%d")
 
                     if rep['turno'] == "Sin definir" or not rep['turno']:
@@ -708,7 +739,6 @@ def render_carga_whatsapp():
                     guardados += 1
 
                 except Exception as e:
-                    # Rollback si se alcanzó a crear la cabecera pero falló el detalle
                     if turno_id:
                         try:
                             supabase.table("reporte_turnos").delete().eq("id", turno_id).execute()
@@ -872,198 +902,4 @@ def render_camara():
         st.markdown(f"**❄️ Producto {i+1}**")
         v_prod = st.selectbox(f"Prod Camara {i+1}", opciones_dinamicas, index=safe_index(opciones_dinamicas, get_val(f'cam_prod_{i}', opciones_dinamicas[0])), key=f"tmp_cp_{i}", label_visibility="collapsed")
         set_val(f'cam_prod_{i}', v_prod)
-        if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
-            c1, c2 = st.columns(2)
-            set_val(f'cam_bat_{i}', c1.number_input("Batches Cámara", min_value=0, step=1, value=get_val(f'cam_bat_{i}', 0), key=f"tmp_cb_{i}"))
-            set_val(f'cam_rep_{i}', c2.number_input("Reproceso", min_value=0, step=1, value=get_val(f'cam_rep_{i}', 0), key=f"tmp_cr_{i}"))
-        st.divider()
-    if st.button("➕ Añadir otro producto a la Cámara"):
-        set_val('camara_count', count + 1)
-        st.rerun()
-
-def render_corte():
-    st.caption("Estado de las líneas de corte. Selecciona los trabajadores de cada línea y sus productos.")
-    for linea in ["C1", "C2", "C3", "Kornspitz", "Amasado"]:
-        icono = "🟢" if "C" in linea else "🟡"
-
-        col_tit, col_dot = st.columns([2, 1])
-        col_tit.markdown(f"### {icono} Línea {linea}")
-        set_val(f'dotacion_corte_{linea}', col_dot.number_input("👥 N° Trabajadores", min_value=0, step=1, value=get_val(f'dotacion_corte_{linea}', 0), key=f"dot_corte_{linea}"))
-
-        count = get_val(f'corte_count_{linea}', 1)
-        for i in range(count):
-            titulo_select = f"Producto {i+1} en Línea {linea}" if i > 0 else f"Producto en Línea {linea}"
-            v_prod = st.selectbox(titulo_select, opciones_dinamicas, index=safe_index(opciones_dinamicas, get_val(f'corte_prod_{linea}_{i}', opciones_dinamicas[0])), key=f"tmp_cop_{linea}_{i}")
-            set_val(f'corte_prod_{linea}_{i}', v_prod)
-
-            if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
-                c1, c2, c3 = st.columns(3)
-                set_val(f'corte_bat_{linea}_{i}', c1.number_input("Batches Cortados", min_value=0, step=1, value=get_val(f'corte_bat_{linea}_{i}', 0), key=f"tmp_cob_{linea}_{i}"))
-                set_val(f'corte_car_{linea}_{i}', c2.number_input("Carros", min_value=0, step=1, value=get_val(f'corte_car_{linea}_{i}', 0), key=f"tmp_coc_{linea}_{i}"))
-                set_val(f'corte_sem_{linea}_{i}', c3.number_input("Semillas (sacos 25kg)", min_value=0.0, step=0.5, value=get_val(f'corte_sem_{linea}_{i}', 0.0), key=f"tmp_cos_{linea}_{i}"))
-
-        if st.button(f"➕ Añadir otro producto a {linea}", key=f"btn_add_{linea}"):
-            set_val(f'corte_count_{linea}', count + 1)
-            st.rerun()
-        st.divider()
-
-def render_horno():
-    c_dot = st.columns([1, 3])
-    set_val('dotacion_horno', c_dot[0].number_input("👥 N° Trabajadores (Horno)", min_value=0, step=1, value=get_val('dotacion_horno', 0), key="dot_horno"))
-    st.divider()
-
-    st.caption("Registro de horneado por producto.")
-    count = get_val('horno_count', 1)
-    for i in range(count):
-        st.markdown(f"**🔥 Producto {i+1}**")
-        v_prod = st.selectbox(f"Prod Horno {i+1}", opciones_dinamicas, index=safe_index(opciones_dinamicas, get_val(f'horno_prod_{i}', opciones_dinamicas[0])), key=f"tmp_hp_{i}", label_visibility="collapsed")
-        set_val(f'horno_prod_{i}', v_prod)
-        if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
-            c1, c2, c3 = st.columns(3)
-            set_val(f'horno_car_{i}', c1.number_input("Carros Horneados", min_value=0, step=1, value=get_val(f'horno_car_{i}', 0), key=f"tmp_hc_{i}"))
-            set_val(f'horno_aba_{i}', c2.number_input("Abatidor (Carros)", min_value=0, step=1, value=get_val(f'horno_aba_{i}', 0), key=f"tmp_ha_{i}"))
-            set_val(f'horno_cru_{i}', c3.number_input("Crudo (Carros)", min_value=0, step=1, value=get_val(f'horno_cru_{i}', 0), key=f"tmp_hcr_{i}"))
-        st.divider()
-    if st.button("➕ Añadir otro producto al Horno"):
-        set_val('horno_count', count + 1)
-        st.rerun()
-
-def render_envasado():
-    c_dot = st.columns([1, 3])
-    set_val('dotacion_envasado', c_dot[0].number_input("👥 N° Trabajadores (Envasado)", min_value=0, step=1, value=get_val('dotacion_envasado', 0), key="dot_env"))
-    st.divider()
-
-    st.caption("Cierre y envasado.")
-    count = get_val('envasado_count', 1)
-    for i in range(count):
-        st.markdown(f"**📦 Envasado {i+1}**")
-        v_prod = st.selectbox(f"Prod Envasado {i+1}", opciones_dinamicas, index=safe_index(opciones_dinamicas, get_val(f'env_prod_{i}', opciones_dinamicas[0])), key=f"tmp_ep_{i}", label_visibility="collapsed")
-        set_val(f'env_prod_{i}', v_prod)
-        if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
-            set_val(f'env_caj_{i}', st.number_input("Cajas", min_value=0, step=1, value=get_val(f'env_caj_{i}', 0), key=f"tmp_ec_{i}"))
-        st.divider()
-    if st.button("➕ Añadir otro producto a Envasado"):
-        set_val('envasado_count', count + 1)
-        st.rerun()
-
-def render_mermas():
-    st.caption("Registro final de mermas generales y harina de polveo.")
-    count = get_val('mermas_count', 1)
-    for i in range(count):
-        st.markdown(f"**🗑️ Registro {i+1}**")
-        v_prod = st.selectbox(f"Producto {i+1}", opciones_dinamicas, index=safe_index(opciones_dinamicas, get_val(f'merma_prod_{i}', opciones_dinamicas[0])), key=f"tmp_mermap_{i}", label_visibility="collapsed")
-        set_val(f'merma_prod_{i}', v_prod)
-        if v_prod not in ["Seleccione un producto...", "Línea Detenida"]:
-            c1, c2, c3 = st.columns(3)
-            set_val(f'merma_cruda_{i}', c1.number_input("Merma Cruda (kg)", min_value=0.0, step=0.5, value=get_val(f'merma_cruda_{i}', 0.0), key=f"tmp_mcr_{i}"))
-            set_val(f'merma_horneada_{i}', c2.number_input("Merma Horneada (kg)", min_value=0.0, step=0.5, value=get_val(f'merma_horneada_{i}', 0.0), key=f"tmp_mho_{i}"))
-            set_val(f'polveo_{i}', c3.number_input("Harina de Polveo/Barrido (kg)", min_value=0.0, step=0.5, value=get_val(f'polveo_{i}', 0.0), key=f"tmp_mpol_{i}"))
-        st.divider()
-    if st.button("➕ Añadir otro registro de mermas"):
-        set_val('mermas_count', count + 1)
-        st.rerun()
-
-pasos_nombres = ["Apertura de Turno", "Masa", "Cámara", "Corte", "Horno", "Envasado", "Mermas y Polveo"]
-paso_actual = get_val('paso_actual', 0)
-
-st.title("Registro de Producción Integral")
-st.progress(paso_actual / (len(pasos_nombres) - 1))
-st.header(f"Paso {paso_actual + 1}: {pasos_nombres[paso_actual]}")
-st.divider()
-
-if paso_actual == 0: render_apertura()
-elif paso_actual == 1: render_masa()
-elif paso_actual == 2: render_camara()
-elif paso_actual == 3: render_corte()
-elif paso_actual == 4: render_horno()
-elif paso_actual == 5: render_envasado()
-elif paso_actual == 6: render_mermas()
-
-st.divider()
-
-col_izq, col_der = st.columns(2)
-
-with col_izq:
-    if paso_actual > 0:
-        if st.button("⬅️ Atrás", use_container_width=True):
-            set_val('paso_actual', paso_actual - 1)
-            st.rerun()
-
-with col_der:
-    if paso_actual < len(pasos_nombres) - 1:
-        if st.button("Siguiente ➡️", type="primary", use_container_width=True):
-            set_val('paso_actual', paso_actual + 1)
-            st.rerun()
-    else:
-        if st.button("💾 Guardar Reporte Completo", type="primary", use_container_width=True):
-            planta_id = get_id(plantas_db, get_val('planta', ''))
-            turno_final = f"{get_val('letra_turno', 'A')}{get_val('num_turno', '1')}"
-            data_turno = {"fecha": str(get_val('fecha', datetime.now())), "planta_id": planta_id, "turno": turno_final}
-
-            try:
-                res_turno = supabase.table("reporte_turnos").insert(data_turno).execute()
-                turno_id = res_turno.data[0]['id']
-                detalles_a_insertar = []
-
-                def agregar_detalle(area, prod, metrica, valor, sub_area=None):
-                    if valor > 0 and prod not in ["Línea Detenida", "Seleccione un producto...", ""]:
-                        detalles_a_insertar.append({
-                            "reporte_id": turno_id, "area_id": get_id(areas_db, area),
-                            "producto_id": get_id(productos_db, prod), "metrica_id": get_id(metricas_db, metrica),
-                            "sub_area": sub_area, "valor": valor
-                        })
-
-                if get_val('dotacion_masa', 0) > 0: agregar_detalle("Masa", "General", "Operarios", get_val('dotacion_masa', 0))
-                if get_val('dotacion_camara', 0) > 0: agregar_detalle("Cámara", "General", "Operarios", get_val('dotacion_camara', 0))
-                for linea in ["C1", "C2", "C3", "Kornspitz", "Amasado"]:
-                    if get_val(f'dotacion_corte_{linea}', 0) > 0:
-                        agregar_detalle("Corte", "General", "Operarios", get_val(f'dotacion_corte_{linea}', 0), linea)
-                if get_val('dotacion_horno', 0) > 0: agregar_detalle("Horno", "General", "Operarios", get_val('dotacion_horno', 0))
-                if get_val('dotacion_envasado', 0) > 0: agregar_detalle("Envasado", "General", "Operarios", get_val('dotacion_envasado', 0))
-
-                for i in range(get_val('masa_count', 1)):
-                    p = get_val(f'masa_prod_{i}', '')
-                    agregar_detalle("Masa", p, "Batch", get_val(f'masa_batch_{i}', 0))
-                    agregar_detalle("Masa", p, "Reproceso", get_val(f'masa_rep_{i}', 0))
-
-                for i in range(get_val('camara_count', 1)):
-                    p = get_val(f'cam_prod_{i}', '')
-                    agregar_detalle("Cámara", p, "Batch", get_val(f'cam_bat_{i}', 0))
-                    agregar_detalle("Cámara", p, "Reproceso", get_val(f'cam_rep_{i}', 0))
-
-                for linea in ["C1", "C2", "C3", "Kornspitz", "Amasado"]:
-                    count_linea = get_val(f'corte_count_{linea}', 1)
-                    for i in range(count_linea):
-                        p = get_val(f'corte_prod_{linea}_{i}', '')
-                        semilla_kg = get_val(f'corte_sem_{linea}_{i}', 0.0) * 25
-                        agregar_detalle("Corte", p, "Batch", get_val(f'corte_bat_{linea}_{i}', 0), linea)
-                        agregar_detalle("Corte", p, "Carros", get_val(f'corte_car_{linea}_{i}', 0), linea)
-                        agregar_detalle("Corte", p, "Semilla", semilla_kg, linea)
-
-                for i in range(get_val('horno_count', 1)):
-                    p = get_val(f'horno_prod_{i}', '')
-                    agregar_detalle("Horno", p, "Carros", get_val(f'horno_car_{i}', 0))
-                    agregar_detalle("Horno", p, "Abatidor", get_val(f'horno_aba_{i}', 0))
-                    agregar_detalle("Horno", p, "Crudo", get_val(f'horno_cru_{i}', 0))
-
-                for i in range(get_val('envasado_count', 1)):
-                    p = get_val(f'env_prod_{i}', '')
-                    agregar_detalle("Envasado", p, "Cajas", get_val(f'env_caj_{i}', 0))
-
-                for i in range(get_val('mermas_count', 1)):
-                    p = get_val(f'merma_prod_{i}', '')
-                    agregar_detalle("Mermas y Polveo", p, "Merma Cruda", get_val(f'merma_cruda_{i}', 0.0))
-                    agregar_detalle("Mermas y Polveo", p, "Merma Horneada", get_val(f'merma_horneada_{i}', 0.0))
-                    agregar_detalle("Mermas y Polveo", p, "Polveo", get_val(f'polveo_{i}', 0.0))
-
-                if detalles_a_insertar:
-                    supabase.table("reporte_detalles").insert(detalles_a_insertar).execute()
-
-                st.success(f"✅ Reporte guardado exitosamente. Turno: {turno_final} (Folio interno: {turno_id})")
-                st.balloons()
-
-                st.session_state.form_data = {}
-                set_val('paso_actual', 0)
-
-            except Exception as e:
-                st.error(f"Error al guardar. Si el turno ya existe, no se puede duplicar. Detalle técnico: {e}")
+        if v_prod not in
