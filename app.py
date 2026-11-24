@@ -272,10 +272,45 @@ def normalizar_turno(texto_raw):
         return "Sin definir", "Turno dejó la plantilla sin elegir (Mañana/Tarde/Noche)"
     return "Sin definir", f"Turno no reconocido ('{limpio[:20]}')"
 
+ALIAS_JEFES = {
+    "lesdamar": "Lesdamar Barbosa",
+    "lesdamar barbosa": "Lesdamar Barbosa",
+    "barbosa": "Lesdamar Barbosa",
+    "luis": "Luis Peñaloza",
+    "luis penaloza": "Luis Peñaloza",
+    "penaloza": "Luis Peñaloza",
+    "macarena": "Macarena Garay",
+    "macarena garay": "Macarena Garay",
+    "garay": "Macarena Garay",
+}
+
+# Límites físicos realistas de planta (min, max). Si un valor se sale, frena el guardado automático.
+LIMITES_FISICOS = {
+    ("Mermas y Polveo", "Merma Deforme"): (0, 200),
+    ("Mermas y Polveo", "Merma Sin Greña"): (0, 200),
+    ("Mermas y Polveo", "Merma Crudo"): (0, 200),
+    ("Mermas y Polveo", "Merma Sobre Cocción"): (0, 200),
+    ("Mermas y Polveo", "Merma Pan a Piso"): (0, 200),
+    ("Mermas y Polveo", "Merma Manchado"): (0, 200),
+    ("Mermas y Polveo", "Merma Cruda"): (0, 400),
+    ("Mermas y Polveo", "Barrido"): (0, 150),
+    ("Mermas y Polveo", "Reproceso"): (0, 600),
+    ("Envasado", "Cajas"): (0, 750),
+    ("Masa", "Batch"): (0, 90),
+    ("Cámara", "Batch"): (0, 90),
+    ("Corte", "Batch"): (0, 90),
+    ("General", "Operarios"): (10, 45),
+}
+
 def normalizar_jefe(texto_raw):
-    """Normaliza nombre del jefe de turno en NFC sin espacios duplicados."""
+    """Normaliza nombre del jefe de turno en NFC y aplica alias oficiales de planta."""
     limpio = re.sub(r'\s+', ' ', _normalizar_unicode(texto_raw)).strip(" -:|.")
-    return limpio.title() if limpio else ""
+    if not limpio:
+        return ""
+    clave = _sin_tildes(limpio).lower()
+    if clave in ALIAS_JEFES:
+        return ALIAS_JEFES[clave]
+    return limpio.title()
 
 def extraer_bloques_whatsapp(texto_completo):
     """Separa un chat exportado (.txt) y devuelve lista de (texto_mensaje, fecha_chat_fallback)."""
@@ -335,6 +370,22 @@ def _valor_linea(bloque, patron_etiqueta, sumar_mas=False):
         if m:
             resto = m.group(1).strip()
             return _suma_nums(resto) if sumar_mas else _num(resto)
+    return 0.0
+
+def _valor_kg_linea(bloque, patron_etiqueta, alertas_ref=None, nombre_alerta=""):
+    """Extrae un peso en kg línea por línea; si el texto indica gramos (gr/g/gramos), convierte a kg."""
+    for linea in bloque.splitlines():
+        m = re.match(rf'^[ \t]*(?:{patron_etiqueta})(?:[ \t]*\([^)]*\))?[ \t]*[:=]?[ \t]*(.*)$', linea, flags=re.IGNORECASE)
+        if m:
+            resto = m.group(1).strip()
+            val = _num(resto)
+            if val > 0 and re.search(r'\d+(?:[.,]\d+)?[ \t]*(?:grs?|gramos?|g)\b', resto, flags=re.IGNORECASE):
+                val_kg = round(val / 1000.0, 2)
+                if alertas_ref is not None:
+                    etq = nombre_alerta or patron_etiqueta
+                    alertas_ref.append(f"{etq}: convertido de {val:g} g a {val_kg} kg")
+                return val_kg
+            return val
     return 0.0
 
 def _texto_linea(bloque, patron_etiqueta):
@@ -499,18 +550,18 @@ def parsear_reporte_plantilla(texto_crudo, fecha_wa_fallback=None):
 
     # --- 6. MERMA PAN COCIDO (kg) ---
     s_mc = secciones.get("merma_cocido", "")
-    add("Mermas y Polveo", "General", "Merma Deforme", _valor_linea(s_mc, r'Deforme'))
-    add("Mermas y Polveo", "General", "Merma Sin Greña", _valor_linea(s_mc, r'Sin[ \t]+gre[ñn]a'))
-    add("Mermas y Polveo", "General", "Merma Crudo", _valor_linea(s_mc, r'Crudo'))
-    add("Mermas y Polveo", "General", "Merma Sobre Cocción", _valor_linea(s_mc, r'Sobre[ \t]+cocci[oó]n'))
-    add("Mermas y Polveo", "General", "Merma Pan a Piso", _valor_linea(s_mc, r'(?:Pan[ \t]+)?a(?:l)?[ \t]+piso'))
-    add("Mermas y Polveo", "General", "Merma Manchado", _valor_linea(s_mc, r'(?:Merma[ \t]+pan[ \t]+)?manchado'))
+    add("Mermas y Polveo", "General", "Merma Deforme", _valor_kg_linea(s_mc, r'Deforme', alertas, "Merma Deforme"))
+    add("Mermas y Polveo", "General", "Merma Sin Greña", _valor_kg_linea(s_mc, r'Sin[ \t]+gre[ñn]a', alertas, "Merma Sin Greña"))
+    add("Mermas y Polveo", "General", "Merma Crudo", _valor_kg_linea(s_mc, r'Crudo', alertas, "Merma Crudo"))
+    add("Mermas y Polveo", "General", "Merma Sobre Cocción", _valor_kg_linea(s_mc, r'Sobre[ \t]+cocci[oó]n', alertas, "Merma Sobre Cocción"))
+    add("Mermas y Polveo", "General", "Merma Pan a Piso", _valor_kg_linea(s_mc, r'(?:Pan[ \t]+)?a(?:l)?[ \t]+piso', alertas, "Merma Pan a Piso"))
+    add("Mermas y Polveo", "General", "Merma Manchado", _valor_kg_linea(s_mc, r'(?:Merma[ \t]+pan[ \t]+)?manchado', alertas, "Merma Manchado"))
 
     # --- 7. MERMA DE MASA Y OTROS (kg) ---
     s_mm = secciones.get("merma_masa", "")
-    add("Mermas y Polveo", "General", "Merma Cruda", _valor_linea(s_mm, r'Merma[ \t]+de[ \t]+masa'))
-    add("Mermas y Polveo", "General", "Reproceso", _valor_linea(s_mm, r'Reproceso'))
-    add("Mermas y Polveo", "General", "Barrido", _valor_linea(s_mm, r'Barrido'))
+    add("Mermas y Polveo", "General", "Merma Cruda", _valor_kg_linea(s_mm, r'Merma[ \t]+de[ \t]+masa', alertas, "Merma Cruda"))
+    add("Mermas y Polveo", "General", "Reproceso", _valor_kg_linea(s_mm, r'Reproceso', alertas, "Reproceso"))
+    add("Mermas y Polveo", "General", "Barrido", _valor_kg_linea(s_mm, r'Barrido', alertas, "Barrido"))
 
     # --- 8. INSUMOS ---
     s_ins = secciones.get("insumos", "")
@@ -541,6 +592,32 @@ def parsear_reporte_plantilla(texto_crudo, fecha_wa_fallback=None):
         lineas_nov = [re.sub(r'_+', '', l).strip() for l in s_nov.splitlines()[1:] if re.sub(r'_+', '', l).strip()]
         novedades_final = " | ".join(lineas_nov)
 
+    # --- VALIDACIÓN POKA-YOKE DE FECHA Y RANGOS FÍSICOS ---
+    freno_revision = False
+    try:
+        dt_rep = datetime.strptime(fecha_iso, "%Y-%m-%d").date()
+        if dt_rep > datetime.now().date():
+            alertas.append(f"Fecha futura ({fecha_iso})")
+            freno_revision = True
+        if fecha_wa_fallback:
+            dt_wa = datetime.strptime(fecha_wa_fallback, "%Y-%m-%d").date()
+            if abs((dt_rep - dt_wa).days) > 15:
+                alertas.append(f"Fecha ({fecha_iso}) difiere >15 días del chat ({fecha_wa_fallback})")
+                freno_revision = True
+    except Exception:
+        pass
+
+    for d in detalles:
+        lim = LIMITES_FISICOS.get((d["area"], d["metrica"]))
+        if lim:
+            lo, hi = lim
+            if (lo > 0 and d["valor"] < lo) or d["valor"] > hi:
+                alertas.append(f"Valor fuera de rango: {d['metrica']} = {d['valor']} (esperado {lo}–{hi})")
+                freno_revision = True
+
+    if turno not in TURNOS_VALIDOS:
+        freno_revision = True
+
     if len(detalles) == 0:
         alertas.append("Sin métricas numéricas (posible plantilla vacía)")
 
@@ -552,7 +629,7 @@ def parsear_reporte_plantilla(texto_crudo, fecha_wa_fallback=None):
         "detalles": detalles,
         "alertas": alertas,
         "estado": "🟢 Listo" if not alertas else ("🔴 Vacío" if len(detalles) == 0 else "⚠️ Revisar"),
-        "incluir": len(detalles) > 0,
+        "incluir": (len(detalles) > 0) and (not freno_revision),
         "texto_original": texto_crudo
     }
 
