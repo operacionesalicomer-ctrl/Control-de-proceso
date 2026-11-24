@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import re
+import unicodedata
 import time
 from datetime import datetime, timedelta
 from supabase import create_client, Client
@@ -235,9 +236,50 @@ def _validar_fecha_dmy(d_str, m_str, y_str):
     except ValueError:
         return None
 
+TURNOS_VALIDOS = ("Mañana", "Tarde", "Noche")
+
+def _normalizar_unicode(texto):
+    """Normaliza Unicode a NFC (evita bugs iOS/WhatsApp tipo 'MañAna' o 'PeñAloza') y limpia caracteres invisibles."""
+    if not texto:
+        return ""
+    t = unicodedata.normalize("NFC", str(texto))
+    for ch in ("\u200e", "\u200f", "\ufeff", "\u200b"):
+        t = t.replace(ch, "")
+    return t.replace("\u202f", " ").replace("\u00a0", " ")
+
+def _sin_tildes(texto):
+    """Devuelve texto sin tildes ni diacríticos para comparaciones seguras."""
+    t = unicodedata.normalize("NFD", _normalizar_unicode(texto))
+    return "".join(c for c in t if unicodedata.category(c) != "Mn")
+
+def normalizar_turno(texto_raw):
+    """Lista blanca estricta: solo permite Mañana, Tarde o Noche. Nunca deja pasar texto libre."""
+    limpio = _normalizar_unicode(texto_raw).strip()
+    if not limpio:
+        return "Sin definir", "Turno vacío"
+    base = _sin_tildes(limpio).lower()
+    coincidencias = []
+    if any(k in base for k in ["manana", "dia", "am"]):
+        coincidencias.append("Mañana")
+    if "tarde" in base:
+        coincidencias.append("Tarde")
+    if "noche" in base:
+        coincidencias.append("Noche")
+
+    if len(coincidencias) == 1:
+        return coincidencias[0], None
+    if len(coincidencias) > 1:
+        return "Sin definir", "Turno dejó la plantilla sin elegir (Mañana/Tarde/Noche)"
+    return "Sin definir", f"Turno no reconocido ('{limpio[:20]}')"
+
+def normalizar_jefe(texto_raw):
+    """Normaliza nombre del jefe de turno en NFC sin espacios duplicados."""
+    limpio = re.sub(r'\s+', ' ', _normalizar_unicode(texto_raw)).strip(" -:|.")
+    return limpio.title() if limpio else ""
+
 def extraer_bloques_whatsapp(texto_completo):
     """Separa un chat exportado (.txt) y devuelve lista de (texto_mensaje, fecha_chat_fallback)."""
-    texto_limpio = texto_completo.replace("\u200e", "").replace("\u202f", " ").replace("\ufeff", "")
+    texto_limpio = _normalizar_unicode(texto_completo)
     patron_mensaje = r'(?=\[?\d{1,2}[/-]\d{1,2}[/-]\d{2,4},?\s+\d{1,2}:\d{2})'
     mensajes = re.split(patron_mensaje, texto_limpio)
 
@@ -255,8 +297,8 @@ def extraer_bloques_whatsapp(texto_completo):
     return resultados
 
 def _limpiar_texto(texto):
-    """Elimina negritas/tachados de WhatsApp y junta decimales separados por espacio (ej. '14 ,60' -> '14,60')."""
-    t = texto.replace("*", "").replace("~", "")
+    """Normaliza Unicode NFC, elimina negritas/tachados y junta decimales separados por espacio."""
+    t = _normalizar_unicode(texto).replace("*", "").replace("~", "")
     t = re.sub(r'(\d)[ \t]+([.,])[ \t]*(\d)', r'\1\2\3', t)
     t = re.sub(r'(\d)[ \t]*([.,])[ \t]+(\d)', r'\1\2\3', t)
     return t
@@ -362,27 +404,12 @@ def parsear_reporte_plantilla(texto_crudo, fecha_wa_fallback=None):
             fecha_iso = str(datetime.now().date())
             alertas.append("Fecha faltante (se usó fecha de hoy)")
 
-    turno_raw = _texto_linea(hdr, r'Turno').lower()
-    coincidencias_turno = []
-    if any(k in turno_raw for k in ["mañana", "manana", "día", "dia", "am"]):
-        coincidencias_turno.append("Mañana")
-    if "tarde" in turno_raw:
-        coincidencias_turno.append("Tarde")
-    if "noche" in turno_raw:
-        coincidencias_turno.append("Noche")
+    turno_raw = _texto_linea(hdr, r'Turno')
+    turno, alerta_turno = normalizar_turno(turno_raw)
+    if alerta_turno:
+        alertas.append(alerta_turno)
 
-    if len(coincidencias_turno) == 1:
-        turno = coincidencias_turno[0]
-    elif len(coincidencias_turno) > 1:
-        turno = "Sin definir"
-        alertas.append("Turno dejó la plantilla sin elegir (Mañana/Tarde/Noche)")
-    elif turno_raw:
-        turno = turno_raw.title()[:20]
-    else:
-        turno = "Sin definir"
-        alertas.append("Turno vacío")
-
-    jefe_turno = _texto_linea(hdr, r'Jefe[ \t]+de[ \t]+turno').title()
+    jefe_turno = normalizar_jefe(_texto_linea(hdr, r'Jefe[ \t]+de[ \t]+turno'))
     if not jefe_turno:
         alertas.append("Falta Jefe de turno")
 
@@ -535,17 +562,17 @@ def auditar_duplicados(resultados, planta_id):
     if planta_id:
         try:
             res = supabase.table("reporte_turnos").select("fecha, turno").eq("planta_id", planta_id).execute()
-            existentes_bd = {(r['fecha'], str(r['turno']).strip().lower()) for r in res.data}
+            existentes_bd = {(r['fecha'], _sin_tildes(str(r['turno'])).strip().lower()) for r in res.data}
         except Exception:
             pass
 
     ultima_pos = {}
     for idx, rep in enumerate(resultados):
-        clave = (rep['fecha'], rep['turno'].strip().lower())
+        clave = (rep['fecha'], _sin_tildes(rep['turno']).strip().lower())
         ultima_pos[clave] = idx
 
     for idx, rep in enumerate(resultados):
-        clave = (rep['fecha'], rep['turno'].strip().lower())
+        clave = (rep['fecha'], _sin_tildes(rep['turno']).strip().lower())
         if clave in existentes_bd:
             rep['estado'] = "🟡 Ya en BD"
             rep['incluir'] = False
@@ -696,8 +723,11 @@ def render_carga_whatsapp():
                 try:
                     datetime.strptime(rep['fecha'], "%Y-%m-%d")
 
-                    if rep['turno'] == "Sin definir" or not rep['turno']:
-                        raise ValueError("El turno está 'Sin definir'. Corrígelo antes de guardar.")
+                    turno_canonico, _ = normalizar_turno(rep.get('turno', ''))
+                    if turno_canonico not in TURNOS_VALIDOS:
+                        raise ValueError(f"Turno inválido ('{rep.get('turno')}'). Solo se permite Mañana, Tarde o Noche.")
+                    rep['turno'] = turno_canonico
+                    rep['jefe_turno'] = normalizar_jefe(rep.get('jefe_turno', ''))
 
                     detalles_insert = []
                     for d in rep.get('detalles', []):
